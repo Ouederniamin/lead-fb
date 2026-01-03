@@ -39,3 +39,13 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+/app/generated/prisma
+
+# Settings data
+/data/
+
+# Worker sessions and browser profiles
+/worker/sessions/*.json
+/worker/node_modules/
+/worker/profiles/

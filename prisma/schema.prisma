@@ -1,0 +1,872 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================
+// AGENTS - Worker VMs running scrapers
+// ============================================
+model Agent {
+  id            String   @id @default(cuid())
+  name          String   @default("") // Friendly name for the agent
+  type          AgentType @default(LEAD_GEN)
+  
+  // Facebook Account (linked)
+  accountId     String?  @map("account_id")
+  account       Account? @relation(fields: [accountId], references: [id])
+  
+  // Legacy fields (for backwards compatibility)
+  accountEmail  String?  @map("account_email")
+  accountName   String?  @map("account_name")
+  vmHost        String?  @map("vm_host")
+  vmIp          String?  @map("vm_ip")
+  
+  status        AgentStatus @default(OFFLINE)
+  lastHeartbeat DateTime? @map("last_heartbeat")
+  
+  // Schedule configuration (JSON)
+  schedule      Json?    // AgentSchedule object
+  
+  // Daily counters (reset at midnight)
+  dailyComments Int      @default(0) @map("daily_comments")
+  dailyDms      Int      @default(0) @map("daily_dms")
+  dailyScrapes  Int      @default(0) @map("daily_scrapes")
+  dailyFriendRequests Int @default(0) @map("daily_friend_requests")
+  
+  // Lifetime statistics
+  totalPostsScraped   Int @default(0) @map("total_posts_scraped")
+  totalLeadsFound     Int @default(0) @map("total_leads_found")
+  totalCommentsMade   Int @default(0) @map("total_comments_made")
+  totalDMsSent        Int @default(0) @map("total_dms_sent")
+  
+  // Engagement settings
+  autoCommentEnabled  Boolean @default(false) @map("auto_comment_enabled")
+  autoDMEnabled       Boolean @default(false) @map("auto_dm_enabled")
+  
+  isHealthy     Boolean  @default(true) @map("is_healthy")
+  lastError     String?  @map("last_error")
+  
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  assignedGroups Group[]
+  scrapedLeads   Lead[]
+  logs           Log[]
+  agentLogs      AgentLog[]
+
+  @@map("agents")
+}
+
+enum AgentType {
+  LEAD_GEN           // Scraper + DM agent
+  FIRST_TIME_SCRAPER // Initial group scraper
+  DM_ONLY            // Only handles DMs (for follow-ups)
+}
+
+enum AgentStatus {
+  ONLINE
+  OFFLINE
+  SCRAPING
+  ENGAGING
+  COOLING_DOWN
+  RATE_LIMITED
+  BANNED
+  INITIALIZING
+}
+
+// ============================================
+// GROUPS - Facebook groups to scrape
+// ============================================
+model Group {
+  id            String   @id @default(cuid())
+  url           String   @unique
+  fbGroupId     String?  @unique @map("fb_group_id") // Facebook's group ID
+  name          String
+  description   String?
+  memberCount   Int?     @map("member_count")
+  
+  // Assignment - Agent (legacy)
+  assignedAgentId String? @map("assigned_agent_id")
+  assignedAgent   Agent?  @relation(fields: [assignedAgentId], references: [id])
+  
+  // Assignment - Account (for Initiator/Message agents)
+  // One account can be assigned to MANY groups
+  assignedAccountId String? @map("assigned_account_id")
+  assignedAccount   Account? @relation(fields: [assignedAccountId], references: [id])
+  
+  // Initialization tracking
+  isInitialized       Boolean  @default(false) @map("is_initialized")
+  initializedAt       DateTime? @map("initialized_at")
+  
+  // Last scraped tracking (for incremental scraping)
+  lastScrapedPermalinkId String? @map("last_scraped_permalink_id")  // STABLE: permalink ID (e.g., 1381383086617098)
+  lastScrapedPostId   String?  @map("last_scraped_post_id")  // Full permalink URL (for reference)
+  lastScrapedShareUrl String?  @map("last_scraped_share_url")  // Original share URL (NOT stable!)
+  lastScrapedAt       DateTime? @map("last_scraped_at")
+  
+  // Legacy tracking fields
+  lastScraped   DateTime? @map("last_scraped")
+  scrapesToday  Int      @default(0) @map("scrapes_today")
+  totalLeads    Int      @default(0) @map("total_leads")
+  totalPosts    Int      @default(0) @map("total_posts")
+  
+  isActive      Boolean  @default(true) @map("is_active")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  // Relations
+  leads         Lead[]
+  posts         GroupPost[]
+
+  @@index([assignedAccountId])
+  @@map("groups")
+}
+
+// ============================================
+// GROUP POSTS - All posts from Facebook groups
+// ============================================
+model GroupPost {
+  id            String   @id @default(cuid())
+  
+  // Facebook identifiers
+  permalinkId   String?  @unique @map("permalink_id")  // STABLE ID extracted from permalink URL (e.g., 1381383086617098)
+  fbPostId      String?  @map("fb_post_id")  // Optional - extracted from URL if available
+  postUrl       String   @unique @map("post_url")  // Resolved permalink after visiting (may have query params)
+  shareUrl      String?  @map("share_url")  // Original copy link URL (NOT stable - can change between scrapes!)
+  
+  // Author info
+  authorName    String?  @map("author_name")
+  authorFbId    String?  @map("author_fb_id")
+  authorProfileUrl String? @map("author_profile_url")
+  isAnonymous   Boolean  @default(false) @map("is_anonymous")
+  
+  // Content - may be null initially (3-phase scraping)
+  postText      String?  @map("post_text")  // Nullable for phase 1 (URL-only)
+  postDate      DateTime? @map("post_date")
+  
+  // Content status (for 3-phase scraping)
+  hasContent    Boolean  @default(false) @map("has_content")  // True after content extracted
+  extractionMethod String? @map("extraction_method")  // Which selector found the content
+  
+  // Media
+  hasImages     Boolean  @default(false) @map("has_images")
+  hasVideo      Boolean  @default(false) @map("has_video")
+  imageUrls     String[] @map("image_urls")
+  
+  // Engagement metrics (at time of scrape)
+  likeCount     Int      @default(0) @map("like_count")
+  commentCount  Int      @default(0) @map("comment_count")
+  shareCount    Int      @default(0) @map("share_count")
+  
+  // Processing status
+  isAnalyzed    Boolean  @default(false) @map("is_analyzed")
+  isLead        Boolean? @map("is_lead")  // null = not analyzed, true/false = analyzed
+  intentScore   Int?     @map("intent_score")
+  matchedService String? @map("matched_service")  // Which service matched
+  aiAnalysis    Json?    @map("ai_analysis")
+  
+  // Relations
+  groupId       String   @map("group_id")
+  group         Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  
+  leadId        String?  @unique @map("lead_id")
+  lead          Lead?    @relation(fields: [leadId], references: [id])
+  
+  // Timestamps
+  scrapedAt     DateTime @default(now()) @map("scraped_at")
+  
+  @@map("group_posts")
+  @@index([groupId, scrapedAt(sort: Desc)])
+  @@index([postUrl])
+  @@index([hasContent])
+  @@index([isAnalyzed])
+}
+
+// ============================================
+// LEADS - Potential customers from FB posts
+// ============================================
+model Lead {
+  id              String   @id @default(cuid())
+  
+  // Source
+  groupId         String   @map("group_id")
+  group           Group    @relation(fields: [groupId], references: [id])
+  postUrl         String   @unique @map("post_url")
+  
+  // Author info
+  authorName      String?  @map("author_name")
+  authorProfileUrl String? @map("author_profile_url")
+  authorFbId      String?  @map("author_fb_id")
+  isAnonymous     Boolean  @default(false) @map("is_anonymous")
+  
+  // Content
+  postText        String   @map("post_text")
+  postDate        DateTime? @map("post_date")
+  
+  // AI Analysis (stored as JSON)
+  aiAnalysis      Json?    @map("ai_analysis")
+  
+  intentScore     Int      @default(0) @map("intent_score") // 1-5, 5 = highest
+  matchedService  String?  @map("matched_service") // Which service the lead is looking for
+  status          LeadStatus @default(NEW)
+  
+  // Lead Stage (sales pipeline position)
+  stage           LeadStage @default(LEAD)
+  stageUpdatedAt  DateTime? @map("stage_updated_at")
+  contactInfo     String?   @map("contact_info") // Stores phone/WhatsApp if shared by lead
+  
+  // Friend request tracking
+  friendRequestSent   Boolean  @default(false) @map("friend_request_sent")
+  friendRequestSentAt DateTime? @map("friend_request_sent_at")
+  friendRequestAccepted Boolean @default(false) @map("friend_request_accepted")
+  
+  // Engagement tracking (which account engaged this lead)
+  engagedByAccountId  String?  @map("engaged_by_account_id")
+  commentedAt         DateTime? @map("commented_at")
+  initialDmSentAt     DateTime? @map("initial_dm_sent_at")
+  
+  // Tracking
+  scrapedById     String?  @map("scraped_by_id")
+  scrapedBy       Agent?   @relation(fields: [scrapedById], references: [id])
+  
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  conversation      Conversation?
+  groupPost         GroupPost?
+  messengerContact  MessengerContact?
+
+  @@index([intentScore(sort: Desc)])
+  @@index([status])
+  @@index([stage])
+  @@index([createdAt(sort: Desc)])
+  @@map("leads")
+}
+
+enum LeadStatus {
+  NEW
+  COMMENTED
+  DM_SENT
+  RESPONDED
+  CONVERTED
+  ARCHIVED
+}
+
+enum LeadStage {
+  LEAD        // New lead - conversation starting
+  INTERESTED  // Shows interest in services
+  CTA_WHATSAPP // Agreed to share WhatsApp
+  CTA_PHONE   // Agreed to share phone number
+  CONVERTED   // Successfully converted to customer
+  LOST        // Lead is lost/not interested
+}
+
+// ============================================
+// CONVERSATIONS - Engagement tracking
+// ============================================
+model Conversation {
+  id              String   @id @default(cuid())
+  
+  // Lead relation
+  leadId          String   @unique @map("lead_id")
+  lead            Lead     @relation(fields: [leadId], references: [id])
+  
+  // Account that initiated engagement
+  accountId       String   @map("account_id")
+  
+  // Our initial engagement
+  commentText     String?  @map("comment_text")
+  commentPostedAt DateTime? @map("comment_posted_at")
+  initialDmText   String?  @map("initial_dm_text")
+  initialDmSentAt DateTime? @map("initial_dm_sent_at")
+  
+  // Legacy fields (keeping for backwards compatibility)
+  dmText          String?  @map("dm_text")
+  dmSentAt        DateTime? @map("dm_sent_at")
+  
+  // Full message history (JSON array of {sender, text, timestamp})
+  messageHistory  Json     @default("[]") @map("message_history")
+  
+  // Lead's response
+  leadReplied     Boolean  @default(false) @map("lead_replied")
+  replyText       String?  @map("reply_text")
+  replyReceivedAt DateTime? @map("reply_received_at")
+  replyCount      Int      @default(0) @map("reply_count")
+  
+  // Tracking
+  whatsappShared  Boolean  @default(false) @map("whatsapp_shared")
+  isHighIntent    Boolean  @default(false) @map("is_high_intent")
+  notes           String?
+  
+  lastActivity    DateTime @default(now()) @map("last_activity")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([accountId])
+  @@map("conversations")
+}
+
+// ============================================
+// LOGS - System logs for debugging
+// ============================================
+model Log {
+  id        String   @id @default(cuid())
+  
+  agentId   String?  @map("agent_id")
+  agent     Agent?   @relation(fields: [agentId], references: [id])
+  
+  level     LogLevel
+  action    String?  // scrape, comment, dm, heartbeat, error
+  message   String
+  metadata  Json?
+  
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([level])
+  @@index([createdAt(sort: Desc)])
+  @@map("logs")
+}
+
+enum LogLevel {
+  DEBUG
+  INFO
+  WARN
+  ERROR
+}
+
+// ============================================
+// BUSINESS - Business profile settings
+// ============================================
+model Business {
+  id                  String   @id @default(cuid())
+  name                String   @default("")
+  description         String   @default("")
+  location            String   @default("Tunisia")
+  whatsapp            String   @default("")
+  website             String   @default("")
+  languages           String[] @default(["English", "French", "Arabic"])
+  targetAudience      String   @default("") @map("target_audience")
+  uniqueSellingPoints String[] @default([]) @map("unique_selling_points")
+  
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  portfolio           Portfolio[]
+
+  @@map("business")
+}
+
+// ============================================
+// PORTFOLIO - Portfolio items for business
+// ============================================
+model Portfolio {
+  id            String   @id @default(cuid())
+  
+  businessId    String   @map("business_id")
+  business      Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  
+  title         String
+  description   String   @default("")
+  category      String   @default("web")
+  imageUrl      String   @default("") @map("image_url")
+  projectUrl    String   @default("") @map("project_url")
+  technologies  String[] @default([])
+  clientName    String   @default("") @map("client_name")
+  completedDate String   @default("") @map("completed_date")
+  featured      Boolean  @default(false)
+  
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@map("portfolio")
+}
+
+// ============================================
+// SERVICES - Services offered by business
+// ============================================
+model Service {
+  id                  String   @id @default(cuid())
+  
+  name                String   // English name
+  nameFrench          String   @default("") @map("name_french")
+  nameArabic          String   @default("") @map("name_arabic")
+  
+  description         String   @default("")
+  descriptionFrench   String   @default("") @map("description_french")
+  descriptionArabic   String   @default("") @map("description_arabic")
+  
+  category            String   @default("other")
+  keywords            String[] @default([])
+  keywordsArabic      String[] @default([]) @map("keywords_arabic")
+  
+  priceRange          String   @default("") @map("price_range")
+  priceMin            Int      @default(0) @map("price_min")
+  priceMax            Int      @default(0) @map("price_max")
+  currency            String   @default("TND")
+  deliveryTime        String   @default("") @map("delivery_time")
+  
+  features            String[] @default([])
+  targetAudience      String   @default("") @map("target_audience")
+  responseTemplate    String   @default("") @map("response_template")
+  qualifyingQuestions String[] @default([]) @map("qualifying_questions")
+  
+  // Stored as JSON array of {objection, response}
+  objectionHandlers   Json     @default("[]") @map("objection_handlers")
+  
+  isActive            Boolean  @default(true) @map("is_active")
+  
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  @@map("services")
+}
+
+// ============================================
+// ACCOUNTS - Facebook accounts for agents
+// ============================================
+model Account {
+  id              String   @id @default(cuid())
+  
+  email           String   @unique
+  name            String?
+  password        String?  // Encrypted
+  
+  // Session data - Playwright storage state (cookies + localStorage)
+  sessionData     Json?    @map("session_data")
+  userAgent       String?  @map("user_agent")
+  
+  // E2EE Conversation PIN (6 digits for encrypted messages)
+  conversationPin String?  @map("conversation_pin")
+  
+  // Status
+  isLoggedIn      Boolean  @default(false) @map("is_logged_in")
+  lastLoginAt     DateTime? @map("last_login_at")
+  loginError      String?  @map("login_error")
+  
+  // Session health tracking
+  sessionStatus   SessionStatus @default(ACTIVE) @map("session_status")
+  sessionError    String?  @map("session_error")
+  sessionExpiredAt DateTime? @map("session_expired_at")
+  
+  // Rate limiting tracking
+  isBanned        Boolean  @default(false) @map("is_banned")
+  bannedAt        DateTime? @map("banned_at")
+  bannedReason    String?  @map("banned_reason")
+  
+  // Daily limits tracking
+  dailyComments   Int      @default(0) @map("daily_comments")
+  dailyDMs        Int      @default(0) @map("daily_dms")
+  dailyFriendReqs Int      @default(0) @map("daily_friend_reqs")
+  lastResetAt     DateTime? @map("last_reset_at")
+  
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  agents              Agent[]
+  messengerContacts   MessengerContact[]
+  messageAgentConfig  MessageAgentConfig?
+  assignedGroups      Group[]  // Groups assigned to this account
+  notifications       Notification[]
+
+  @@map("accounts")
+}
+
+enum SessionStatus {
+  ACTIVE          // Session is working
+  EXPIRED         // Session expired, needs re-login
+  NEEDS_PASSWORD  // One-click login failed, needs password
+  BANNED          // Account is banned
+}
+
+// ============================================
+// NOTIFICATIONS - System notifications
+// ============================================
+model Notification {
+  id          String   @id @default(cuid())
+  
+  // Type and severity
+  type        NotificationType
+  severity    NotificationSeverity @default(INFO)
+  
+  // Content
+  title       String
+  message     String
+  actionUrl   String?  @map("action_url")  // Link to resolve the issue
+  actionLabel String?  @map("action_label") // Button text
+  
+  // Related entities
+  accountId   String?  @map("account_id")
+  account     Account? @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  
+  // Status
+  isRead      Boolean  @default(false) @map("is_read")
+  isDismissed Boolean  @default(false) @map("is_dismissed")
+  
+  // Metadata
+  metadata    Json?    // Additional data
+  
+  createdAt   DateTime @default(now()) @map("created_at")
+  expiresAt   DateTime? @map("expires_at")  // Auto-dismiss after this time
+
+  @@map("notifications")
+  @@index([isRead, isDismissed])
+  @@index([createdAt(sort: Desc)])
+}
+
+enum NotificationType {
+  SESSION_EXPIRED      // Account session expired
+  SESSION_NEEDS_LOGIN  // Account needs manual re-login
+  ACCOUNT_BANNED       // Account was banned
+  RATE_LIMITED         // Hit rate limits
+  SCRAPE_FAILED        // Scraping failed
+  AGENT_ERROR          // Agent encountered error
+  SYSTEM_INFO          // General info
+}
+
+enum NotificationSeverity {
+  INFO
+  WARNING
+  ERROR
+  CRITICAL
+}
+
+// ============================================
+// AGENT LOGS - Detailed agent action logs
+// ============================================
+model AgentLog {
+  id          String   @id @default(cuid())
+  
+  agentId     String   @map("agent_id")
+  agent       Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  
+  action      AgentAction
+  details     Json?    // Action-specific data
+  
+  groupId     String?  @map("group_id")
+  postId      String?  @map("post_id")   // fbPostId or GroupPost id
+  leadId      String?  @map("lead_id")
+  
+  success     Boolean  @default(true)
+  error       String?
+  duration    Int?     // Duration in milliseconds
+  
+  createdAt   DateTime @default(now()) @map("created_at")
+  
+  @@map("agent_logs")
+  @@index([agentId, createdAt(sort: Desc)])
+  @@index([action])
+}
+
+enum AgentAction {
+  // Scraping actions
+  SCRAPE_START
+  SCRAPE_COMPLETE
+  SCRAPE_ERROR
+  
+  // Post processing
+  POST_FOUND
+  POST_ANALYZED
+  
+  // Lead actions
+  LEAD_CREATED
+  LEAD_SKIPPED
+  
+  // Engagement actions
+  COMMENT_POSTED
+  COMMENT_FAILED
+  DM_SENT
+  DM_FAILED
+  FRIEND_REQUEST_SENT
+  FRIEND_REQUEST_FAILED
+  
+  // Status changes
+  RATE_LIMITED
+  COOLDOWN_START
+  COOLDOWN_END
+  
+  // System
+  HEARTBEAT
+  ERROR
+  WARNING
+}
+
+// ============================================
+// AGENT SCHEDULES - Hourly schedule config per agent type
+// ============================================
+model AgentSchedule {
+  id            String   @id @default(cuid())
+  
+  agentType     ScheduleAgentType @map("agent_type")
+  
+  // Master toggle
+  enabled       Boolean  @default(true)
+  description   String?
+  
+  // Timezone for schedule
+  timezone      String   @default("Africa/Tunis")
+  
+  // Daily limits
+  maxScrapesPerDay      Int @default(25) @map("max_scrapes_per_day")
+  maxCommentsPerDay     Int @default(15) @map("max_comments_per_day")
+  maxDMsPerDay          Int @default(8) @map("max_dms_per_day")
+  maxFriendRequestsPerDay Int @default(10) @map("max_friend_requests_per_day")
+  
+  // Hour config (peak vs normal limits)
+  peakScrapes           Int @default(3) @map("peak_scrapes")
+  peakComments          Int @default(2) @map("peak_comments")
+  normalScrapes         Int @default(1) @map("normal_scrapes")
+  normalComments        Int @default(1) @map("normal_comments")
+  peakDMs               Int @default(3) @map("peak_dms")
+  peakFriendRequests    Int @default(2) @map("peak_friend_requests")
+  normalDMs             Int @default(1) @map("normal_dms")
+  normalFriendRequests  Int @default(1) @map("normal_friend_requests")
+  
+  // Randomization settings
+  randomizationEnabled  Boolean @default(true) @map("randomization_enabled")
+  minDelayMinutes       Int @default(5) @map("min_delay_minutes")
+  maxDelayMinutes       Int @default(45) @map("max_delay_minutes")
+  jitterPercent         Int @default(30) @map("jitter_percent")
+  
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+  
+  // Relations
+  hours         ScheduleHour[]
+  
+  @@unique([agentType])
+  @@map("agent_schedules")
+}
+
+// Individual hour configuration
+model ScheduleHour {
+  id            String   @id @default(cuid())
+  
+  scheduleId    String   @map("schedule_id")
+  schedule      AgentSchedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+  
+  hour          Int      // 0-23
+  enabled       Boolean  @default(false)
+  isPeak        Boolean  @default(false) @map("is_peak")
+  
+  // Actions allowed this hour
+  scrapes       Int      @default(0)
+  comments      Int      @default(0)
+  dms           Int      @default(0)
+  friendRequests Int     @default(0) @map("friend_requests")
+  
+  // Randomized execution times (stored after generation)
+  // Format: ["10:07", "10:34", "10:52"] - times within this hour
+  scheduledTimes String[] @default([]) @map("scheduled_times")
+  lastGenerated DateTime? @map("last_generated")
+  
+  @@unique([scheduleId, hour])
+  @@map("schedule_hours")
+  @@index([scheduleId])
+}
+
+enum ScheduleAgentType {
+  LEAD_GEN
+  MESSAGE_AGENT
+}
+
+// ============================================
+// SCHEDULE EXECUTIONS - Track what ran and when
+// ============================================
+model ScheduleExecution {
+  id            String   @id @default(cuid())
+  
+  agentType     ScheduleAgentType @map("agent_type")
+  hour          Int
+  scheduledTime String   @map("scheduled_time") // "14:23"
+  
+  action        String   // "scrape", "comment", "dm", "friend_request"
+  
+  status        ExecutionStatus @default(PENDING)
+  executedAt    DateTime? @map("executed_at")
+  result        Json?
+  error         String?
+  
+  createdAt     DateTime @default(now()) @map("created_at")
+  
+  @@map("schedule_executions")
+  @@index([agentType, createdAt(sort: Desc)])
+  @@index([status])
+}
+
+enum ExecutionStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  SKIPPED
+}
+
+// ============================================
+// MESSENGER CONTACTS - All known contacts (ACTIVE + OLD)
+// Tracks Facebook Messenger conversations for Message Agent
+// ============================================
+model MessengerContact {
+  id              String   @id @default(cuid())
+  
+  // Account relation
+  accountId       String   @map("account_id")
+  account         Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  
+  // Contact identification - MATCH BY NAME (like testing)
+  contactName     String   @map("contact_name")  // Primary identifier
+  contactFbId     String?  @map("contact_fb_id") // Optional FB ID
+  conversationUrl String   @map("conversation_url")
+  
+  // Link to Lead (if this contact came from a lead)
+  leadId          String?  @unique @map("lead_id")
+  lead            Lead?    @relation(fields: [leadId], references: [id])
+  
+  // Lead Stage tracking (synced with Lead.stage)
+  leadStage       LeadStage? @map("lead_stage")
+  leadStageUpdatedAt DateTime? @map("lead_stage_updated_at")
+  
+  // Status: ACTIVE (tracking) or OLD (boundary marker)
+  status          ContactStatus @default(ACTIVE)
+  
+  // State Machine (only for ACTIVE contacts)
+  state           ConversationStateEnum?
+  previousState   ConversationStateEnum? @map("previous_state")
+  stateChangedAt  DateTime? @map("state_changed_at")
+  
+  // Message Counts (THE KEY!)
+  totalMessageCount   Int @default(0) @map("total_message_count")
+  theirMessageCount   Int @default(0) @map("their_message_count")
+  ourMessageCount     Int @default(0) @map("our_message_count")
+  
+  // Quick Check hash (last 3 messages)
+  quickCheckHash  String?  @map("quick_check_hash")
+  
+  // Last messages
+  lastTheirMessage    String?  @map("last_their_message")
+  lastTheirMessageAt  DateTime? @map("last_their_message_at")
+  lastOurReply        String?  @map("last_our_reply")
+  lastOurReplyAt      DateTime? @map("last_our_reply_at")
+  lastMessageIsOurs   Boolean  @default(false) @map("last_message_is_ours")
+  
+  // Timestamps
+  lastCheckedAt   DateTime? @map("last_checked_at")
+  lastFullCheckAt DateTime? @map("last_full_check_at")
+  lastActivityAt  DateTime? @map("last_activity_at")
+  
+  // For OLD contacts - why they were archived
+  archivedAt      DateTime? @map("archived_at")
+  archiveReason   String?   @map("archive_reason") // 'inactive' | 'manually-excluded'
+  
+  // Conversation ended?
+  conversationEnded Boolean @default(false) @map("conversation_ended")
+  endReason       String?  @map("end_reason")
+  
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  
+  // Messages relation
+  messages        MessengerMessage[]
+  
+  // Unique per account + contact name
+  @@unique([accountId, contactName])
+  @@index([accountId, status])
+  @@index([accountId, state])
+  @@index([lastActivityAt(sort: Desc)])
+  @@map("messenger_contacts")
+}
+
+enum ContactStatus {
+  ACTIVE  // Currently tracking
+  OLD     // Boundary marker (not tracking)
+}
+
+enum ConversationStateEnum {
+  NEW
+  NEEDS_REPLY
+  WAITING
+  ACTIVE
+  IDLE
+  ENDED
+}
+
+// ============================================
+// MESSENGER MESSAGES - Full conversation history for AI context
+// ============================================
+model MessengerMessage {
+  id            String   @id @default(cuid())
+  
+  // Contact relation
+  contactId     String   @map("contact_id")
+  contact       MessengerContact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  
+  // Message content
+  content       String   @db.Text
+  sender        MessageSender
+  messageOrder  Int      @default(0) @map("message_order")
+  
+  // Timestamps
+  timestamp     DateTime @default(now())
+  createdAt     DateTime @default(now()) @map("created_at")
+  
+  @@index([contactId, messageOrder])
+  @@map("messenger_messages")
+}
+
+enum MessageSender {
+  US
+  THEM
+  UNKNOWN
+}
+
+// ============================================
+// MESSAGE AGENT CONFIG - Per-account settings
+// ============================================
+model MessageAgentConfig {
+  id              String   @id @default(cuid())
+  
+  accountId       String   @unique @map("account_id")
+  account         Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  
+  // Smart Boundary settings
+  inactiveDays    Int      @default(7) @map("inactive_days")      // Days before ACTIVE → OLD
+  refreshOldDays  Int      @default(7) @map("refresh_old_days")   // Days between full sidebar scans
+  
+  // Quick Check settings
+  forceFullCheckHours Int  @default(24) @map("force_full_check_hours")
+  
+  // Scan frequency
+  scanIntervalMinutes Int  @default(15) @map("scan_interval_minutes")
+  
+  // Last operations
+  lastFullSidebarScan DateTime? @map("last_full_sidebar_scan")
+  lastScanAt          DateTime? @map("last_scan_at")
+  lastMaintenanceAt   DateTime? @map("last_maintenance_at")
+  
+  // Stats
+  totalActiveContacts Int  @default(0) @map("total_active_contacts")
+  totalOldContacts    Int  @default(0) @map("total_old_contacts")
+  
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  
+  @@map("message_agent_configs")
+}
+
+// ============================================
+// SETTINGS - Key-value store for app settings
+// ============================================
+model Setting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String   @db.Text  // Text type for long prompts
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  
+  @@map("settings")
+}

@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Build
+dist/
+
+# Environment
+.env
+
+# Sessions (contain Facebook auth - sensitive!)
+sessions/*.json
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
