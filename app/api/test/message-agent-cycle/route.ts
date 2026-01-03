@@ -2,9 +2,24 @@ import { NextRequest, NextResponse } from "next/server";
 import { chromium, Browser, Page } from "playwright";
 import prisma from "@/lib/db";
 import { ConversationStateEnum } from "@prisma/client";
+import { generateObject } from "ai";
+import { model } from "@/lib/ai";
+import { z } from "zod";
+import fs from 'fs/promises';
+import path from 'path';
 
 // E2EE PIN selectors - matches the working version from conversation-pin
 const PIN_DIALOG_SELECTOR = '[role="dialog"] input[aria-label="PIN"][autocomplete="one-time-code"][maxlength="6"]';
+
+// Business data file path
+const BUSINESS_FILE = path.join(process.cwd(), 'data', 'business.json');
+
+// Reply schema for AI generation - now returns array of messages
+const ReplySchema = z.object({
+  messages: z.array(z.string()).describe("Array of short messages to send consecutively. Each message should be 1-2 sentences max. Split your reply into multiple natural messages like a real chat conversation."),
+  intent: z.enum(['greeting', 'qualify', 'propose', 'close', 'follow_up', 'objection_handling']).describe("The intent of this reply"),
+  reasoning: z.string().describe("Why this reply was chosen"),
+});
 
 // System messages to filter out
 const SYSTEM_MESSAGE_PATTERNS = [
@@ -21,6 +36,12 @@ export async function POST(request: NextRequest) {
   let browser: Browser | null = null;
   const logs: string[] = [];
   const errors: string[] = [];
+  
+  // Cumulative stats for continuous mode
+  let totalChecked = 0;
+  const allNewMessages: { contactName: string; message: string; contactId: string }[] = [];
+  const allRepliesSent: { contactName: string; reply: string }[] = [];
+  let cycleCount = 0;
 
   function log(msg: string) {
     logs.push(msg);
@@ -29,7 +50,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json();
-    const { accountId, autoReply = false } = body;
+    const { accountId, idleTimeout = 0 } = body; // 0 = single cycle, >0 = continuous monitoring
 
     if (!accountId) {
       return NextResponse.json({ success: false, errors: ["accountId required"] }, { status: 400 });
@@ -44,29 +65,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, errors: ["Account not found"] }, { status: 404 });
     }
 
-    // Step 1: Load last 40 contacts from database
-    log("Step 1: Loading contacts from database...");
-    const dbContacts = await prisma.messengerContact.findMany({
-      where: { accountId },
-      orderBy: { lastActivityAt: "desc" },
-      take: 40,
-      select: {
-        id: true,
-        contactName: true,
-        contactFbId: true,
-        lastTheirMessage: true,
-        lastMessageIsOurs: true,
-        state: true,
-        conversationUrl: true,
-      },
-    });
-
-    // Build Map for O(1) lookup
-    const dbMap = new Map(
-      dbContacts.map(c => [c.contactName, c])
-    );
-    log(`  Loaded ${dbContacts.length} contacts into memory`);
-
     // Check for session data in database
     if (!account.sessionData) {
       return NextResponse.json({ 
@@ -75,7 +73,11 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
-    log("Step 2: Launching browser & checking E2EE PIN...");
+    log(idleTimeout > 0 
+      ? `Starting CONTINUOUS monitoring (idle timeout: ${idleTimeout}s)...` 
+      : "Starting SINGLE cycle...");
+    
+    log("Step 1: Launching browser & checking E2EE PIN...");
     browser = await chromium.launch({ headless: false });
     const context = await browser.newContext({
       storageState: account.sessionData as any,
@@ -93,150 +95,318 @@ export async function POST(request: NextRequest) {
     // Check for E2EE PIN dialog (ALWAYS check on every browser open!)
     const pinEntered = await checkAndEnterPin(page, account.conversationPin || "", log);
 
-    // Step 3: Scan sidebar
-    log("Step 3: Scanning sidebar...");
-    const sidebarConversations = await extractSidebarConversations(page, log);
-    log(`  Found ${sidebarConversations.length} conversations in sidebar`);
+    // Dismiss any notification popups (like push notification requests)
+    log("  Checking for notification popups to dismiss...");
+    await dismissNotificationPopup(page, log);
 
-    // Step 4: Compare in memory
-    log("Step 4: Comparing with database (in memory)...");
-    const newMessages: { contactName: string; message: string; contactId: string }[] = [];
-    const needsReplyIds: string[] = [];
+    // Continuous monitoring loop
+    let lastActivityTime = Date.now();
+    const checkInterval = 30000; // 30 seconds between checks
+    const isContinuousMode = idleTimeout > 0;
 
-    for (const conv of sidebarConversations) {
-      const existing = dbMap.get(conv.contactName);
-      
-      if (!existing) {
-        log(`  New contact not in DB: ${conv.contactName}`);
-        continue;
-      }
+    do {
+      cycleCount++;
+      log(`\n═══ Cycle ${cycleCount} ═══`);
 
-      // Skip if last message is from us
-      if (conv.lastMessageIsOurs) {
-        continue;
-      }
-
-      // Compare sidebar message with stored message
-      if (existing.lastTheirMessage !== conv.lastMessage && !conv.lastMessageIsOurs) {
-        log(`  📨 NEW MESSAGE: ${conv.contactName}`);
-        log(`     Old: "${existing.lastTheirMessage?.substring(0, 30)}..."`);
-        log(`     New: "${conv.lastMessage.substring(0, 30)}..."`);
-        
-        newMessages.push({
-          contactName: conv.contactName,
-          message: conv.lastMessage,
-          contactId: existing.id,
-        });
-        needsReplyIds.push(existing.id);
-      }
-    }
-
-    log(`  Detected ${newMessages.length} new messages`);
-
-    // Step 5: Batch update database
-    if (needsReplyIds.length > 0) {
-      log("Step 5: Updating database...");
-      await prisma.messengerContact.updateMany({
-        where: { id: { in: needsReplyIds } },
-        data: {
-          state: "NEEDS_REPLY",
-          lastActivityAt: new Date(),
+      // Step 2: Load contacts from database (refresh each cycle for up-to-date data)
+      log("Loading contacts from database...");
+      const dbContacts = await prisma.messengerContact.findMany({
+        where: { accountId },
+        orderBy: { lastActivityAt: "desc" },
+        take: 40,
+        select: {
+          id: true,
+          contactName: true,
+          contactFbId: true,
+          lastTheirMessage: true,
+          lastMessageIsOurs: true,
+          state: true,
+          conversationUrl: true,
         },
       });
 
-      // Update each contact's lastTheirMessage
-      for (const msg of newMessages) {
-        await prisma.messengerContact.update({
-          where: { id: msg.contactId },
-          data: { lastTheirMessage: msg.message },
-        });
-      }
-      log(`  Updated ${needsReplyIds.length} contacts to NEEDS_REPLY`);
-    }
+      // Build Map for O(1) lookup
+      const dbMap = new Map(
+        dbContacts.map(c => [c.contactName, c])
+      );
+      log(`  Loaded ${dbContacts.length} contacts into memory`);
 
-    // Step 6: Process replies if autoReply is enabled
-    const repliesSent: { contactName: string; reply: string }[] = [];
+      // Step 3: Scan sidebar
+      log("Scanning sidebar...");
+      const sidebarConversations = await extractSidebarConversations(page, log);
+      log(`  Found ${sidebarConversations.length} conversations`);
+      totalChecked += sidebarConversations.length;
 
-    if (autoReply && newMessages.length > 0) {
-      log("Step 6: Generating and sending AI replies...");
-      
-      for (const msg of newMessages) {
-        try {
-          // Get full contact info
-          const contact = await prisma.messengerContact.findUnique({
-            where: { id: msg.contactId },
-            include: { lead: true },
-          });
+      // Step 4: Compare in memory
+      log("Comparing with database...");
+      const cycleNewMessages: { contactName: string; message: string; contactId: string }[] = [];
+      const needsReplyIds: string[] = [];
 
-          if (!contact) continue;
+      for (const conv of sidebarConversations) {
+        const existing = dbMap.get(conv.contactName);
+        
+        if (!existing) {
+          continue; // Skip contacts not in DB
+        }
 
-          // Open conversation
-          log(`  Opening: ${msg.contactName}...`);
-          const convLink = page.locator(`a[href*="/messages/t/"]`).filter({ hasText: msg.contactName }).first();
+        // Skip if last message is from us
+        if (conv.lastMessageIsOurs) {
+          continue;
+        }
+
+        // Compare sidebar message with stored message
+        if (existing.lastTheirMessage !== conv.lastMessage && !conv.lastMessageIsOurs) {
+          log(`  📨 NEW: ${conv.contactName}: "${conv.lastMessage.substring(0, 40)}..."`);
           
-          if (await convLink.isVisible({ timeout: 3000 }).catch(() => false)) {
+          cycleNewMessages.push({
+            contactName: conv.contactName,
+            message: conv.lastMessage,
+            contactId: existing.id,
+          });
+          needsReplyIds.push(existing.id);
+        }
+      }
+
+      log(`  Detected ${cycleNewMessages.length} new messages this cycle`);
+
+      // Update activity time if we found new messages
+      if (cycleNewMessages.length > 0) {
+        lastActivityTime = Date.now();
+        allNewMessages.push(...cycleNewMessages);
+      }
+
+      // Step 5: Batch update database
+      if (needsReplyIds.length > 0) {
+        log("Updating database...");
+        await prisma.messengerContact.updateMany({
+          where: { id: { in: needsReplyIds } },
+          data: {
+            state: "NEEDS_REPLY",
+            lastActivityAt: new Date(),
+          },
+        });
+
+        // Update each contact's lastTheirMessage
+        for (const msg of cycleNewMessages) {
+          await prisma.messengerContact.update({
+            where: { id: msg.contactId },
+            data: { lastTheirMessage: msg.message },
+          });
+        }
+      }
+
+      // Step 6: Generate and send AI replies for new messages
+      if (cycleNewMessages.length > 0) {
+        log("Generating and sending AI replies...");
+        
+        for (const msg of cycleNewMessages) {
+          try {
+            // Get full contact info including FB ID and messages
+            const contact = await prisma.messengerContact.findUnique({
+              where: { id: msg.contactId },
+              include: { 
+                lead: true,
+                messages: {
+                  orderBy: { createdAt: 'asc' },
+                  // Get all messages for full conversation context
+                },
+              },
+            });
+
+            if (!contact) {
+              log(`  ⚠️ Contact not found: ${msg.contactId}`);
+              continue;
+            }
+
+            // Open conversation using contactFbId (like conversation-init does)
+            log(`  Opening: ${msg.contactName} (FB ID: ${contact.contactFbId})...`);
+            
+            // Try regular URL first
+            let convLink = page.locator(`a[href*="/messages/t/${contact.contactFbId}"]`).first();
+            let linkVisible = await convLink.isVisible({ timeout: 2000 }).catch(() => false);
+            
+            // Try E2EE URL if regular not found
+            if (!linkVisible) {
+              log(`    Regular link not found, trying E2EE...`);
+              convLink = page.locator(`a[href*="/messages/e2ee/t/${contact.contactFbId}"]`).first();
+              linkVisible = await convLink.isVisible({ timeout: 2000 }).catch(() => false);
+            }
+            
+            // Fallback: try by name if FB ID didn't work
+            if (!linkVisible) {
+              log(`    E2EE link not found, trying by name...`);
+              convLink = page.locator(`a[href*="/messages/"]`).filter({ hasText: msg.contactName }).first();
+              linkVisible = await convLink.isVisible({ timeout: 2000 }).catch(() => false);
+            }
+            
+            if (!linkVisible) {
+              log(`  ⚠️ Could not find conversation link for ${msg.contactName}`);
+              continue;
+            }
+
             await convLink.click({ force: true });
-            await page.waitForTimeout(2000);
+            log(`    Clicked conversation link`);
+            await page.waitForTimeout(2500);
 
-            // No per-conversation PIN check needed - already unlocked at browser open
+            // Extract recent messages from the open conversation
+            log(`    Extracting recent messages from conversation...`);
+            const recentMessages = await extractRecentMessages(page, msg.contactName);
+            log(`    Found ${recentMessages.length} recent messages in view`);
 
-            // Get business and services for AI context
-            const business = await prisma.business.findFirst();
-            const services = await prisma.service.findMany();
+            // Build set of existing message contents for comparison
+            const existingContents = new Set(contact.messages.map(m => m.content));
+            
+            // Find NEW messages not in DB
+            const newIncomingMessages: { sender: 'THEM' | 'US'; content: string }[] = [];
+            for (const rm of recentMessages) {
+              if (!existingContents.has(rm.content)) {
+                newIncomingMessages.push(rm);
+              }
+            }
+            
+            log(`    ${newIncomingMessages.length} new messages to save`);
+            
+            // Save all new incoming messages to database
+            for (const newMsg of newIncomingMessages) {
+              await prisma.messengerMessage.create({
+                data: {
+                  contactId: msg.contactId,
+                  content: newMsg.content,
+                  sender: newMsg.sender,
+                },
+              });
+              log(`    💾 Saved: [${newMsg.sender}] "${newMsg.content.substring(0, 30)}..."`);
+            }
 
-            // Generate AI reply
-            const reply = await generateAIReply(
+            // Build conversation history from stored messages + new ones
+            const conversationHistory = contact.messages.map(m => ({
+              sender: m.sender === 'US' ? 'us' : (m.sender === 'THEM' ? 'them' : 'unknown'),
+              text: m.content,
+            }));
+            
+            // Add new messages to history
+            for (const newMsg of newIncomingMessages) {
+              conversationHistory.push({
+                sender: newMsg.sender === 'US' ? 'us' : 'them',
+                text: newMsg.content,
+              });
+            }
+
+            log(`    Conversation history: ${conversationHistory.length} messages total`);
+            if (conversationHistory.length > 0) {
+              const lastMsgs = conversationHistory.slice(-3);
+              log(`    Last 3 msgs:`);
+              for (const lm of lastMsgs) {
+                log(`      [${lm.sender}] "${lm.text.substring(0, 40)}..."`);
+              }
+            }
+
+            log(`    Calling AI to generate reply...`);
+
+            // Generate AI reply with proper conversation history
+            const replies = await generateAIReply(
               msg.contactName,
-              msg.message,
+              conversationHistory,
               contact.lead,
-              business,
-              services
             );
 
-            if (reply) {
-              // Find and type in message input
-              const messageInput = page.locator('[role="textbox"][aria-label*="Message"]').first();
-              if (await messageInput.isVisible({ timeout: 2000 }).catch(() => false)) {
+            if (!replies || replies.length === 0) {
+              log(`  ⚠️ AI returned no reply for ${msg.contactName}`);
+              continue;
+            }
+            
+            log(`    AI generated ${replies.length} messages to send`);
+
+            // Find message input
+            const messageInput = page.locator('[role="textbox"][aria-label*="Message"]').first();
+            if (await messageInput.isVisible({ timeout: 3000 }).catch(() => false)) {
+              
+              // Send each message consecutively
+              for (let i = 0; i < replies.length; i++) {
+                const replyText = replies[i];
+                log(`    📤 Sending message ${i + 1}/${replies.length}: "${replyText.substring(0, 40)}..."`);
+                
                 await messageInput.click();
-                await messageInput.fill(reply);
-                await page.waitForTimeout(500);
+                await page.waitForTimeout(200);
+                await messageInput.fill(replyText);
+                await page.waitForTimeout(300);
 
                 // Send message
                 await page.keyboard.press("Enter");
-                await page.waitForTimeout(1000);
+                
+                // Wait between messages (human-like delay)
+                const delay = 800 + Math.random() * 700; // 800-1500ms
+                await page.waitForTimeout(delay);
 
-                log(`  ✅ Sent reply to ${msg.contactName}`);
-                repliesSent.push({ contactName: msg.contactName, reply });
-
-                // Update state to WAITING (we sent, waiting for their reply)
-                await prisma.messengerContact.update({
-                  where: { id: msg.contactId },
+                // Save each message to database
+                await prisma.messengerMessage.create({
                   data: {
-                    state: ConversationStateEnum.WAITING,
-                    lastMessageIsOurs: true,
+                    contactId: msg.contactId,
+                    content: replyText,
+                    sender: 'US',
                   },
                 });
               }
-            }
-          }
 
-        } catch (err) {
-          log(`  ❌ Error replying to ${msg.contactName}: ${err}`);
-          errors.push(`${msg.contactName}: ${err}`);
+              log(`  ✅ Sent ${replies.length} messages to ${msg.contactName}`);
+              allRepliesSent.push({ contactName: msg.contactName, reply: replies.join(' | ') });
+
+              // Update state to WAITING (we sent, waiting for their reply)
+              await prisma.messengerContact.update({
+                where: { id: msg.contactId },
+                data: {
+                  state: ConversationStateEnum.WAITING,
+                  lastMessageIsOurs: true,
+                },
+              });
+            } else {
+              log(`  ⚠️ Message input not visible for ${msg.contactName}`);
+            }
+          } catch (err) {
+            log(`  ❌ Error replying to ${msg.contactName}: ${err}`);
+            errors.push(`${msg.contactName}: ${err}`);
+          }
         }
       }
-    }
+
+      // Check if we should continue in continuous mode
+      if (isContinuousMode) {
+        const idleMs = Date.now() - lastActivityTime;
+        const idleTimeoutMs = idleTimeout * 1000;
+        
+        if (idleMs >= idleTimeoutMs) {
+          log(`\n⏱️ Idle timeout reached (${Math.round(idleMs / 1000)}s with no new messages)`);
+          break;
+        }
+
+        const remainingIdle = Math.round((idleTimeoutMs - idleMs) / 1000);
+        log(`  Waiting ${checkInterval / 1000}s before next check... (${remainingIdle}s until idle timeout)`);
+        
+        // Scroll sidebar slightly to refresh
+        await page.evaluate(() => {
+          const sidebar = document.querySelector('[role="navigation"] [role="list"]');
+          if (sidebar) {
+            sidebar.scrollTop = 0;
+          }
+        });
+        
+        await page.waitForTimeout(checkInterval);
+      }
+
+    } while (isContinuousMode);
 
     // Close browser
+    log("\nClosing browser...");
     await browser.close();
     browser = null;
 
     return NextResponse.json({
       success: true,
       pinEntered,
-      checked: sidebarConversations.length,
-      newMessages: newMessages.map(m => ({ contactName: m.contactName, message: m.message })),
-      repliesSent,
+      checked: totalChecked,
+      cycleCount,
+      newMessages: allNewMessages.map(m => ({ contactName: m.contactName, message: m.message })),
+      repliesSent: allRepliesSent,
       logs,
       errors: errors.length > 0 ? errors : undefined,
     });
@@ -248,9 +418,10 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: false,
-      checked: 0,
-      newMessages: [],
-      repliesSent: [],
+      checked: totalChecked,
+      cycleCount,
+      newMessages: allNewMessages.map(m => ({ contactName: m.contactName, message: m.message })),
+      repliesSent: allRepliesSent,
       errors,
       logs,
     }, { status: 500 });
@@ -419,38 +590,325 @@ async function extractSidebarConversations(page: Page, log: (msg: string) => voi
   }
 }
 
-// Generate AI reply (simplified - you can expand this)
+// Extract recent messages from an open conversation
+async function extractRecentMessages(page: Page, contactName: string): Promise<Array<{ sender: 'THEM' | 'US'; content: string }>> {
+  try {
+    // Wait for messages to load
+    await page.waitForTimeout(1000);
+    
+    const messages = await page.evaluate((contactNameArg) => {
+      const result: Array<{ sender: 'THEM' | 'US'; content: string }> = [];
+      
+      const main = document.querySelector('[role="main"]');
+      if (!main) return result;
+      
+      const rows = main.querySelectorAll('[role="row"]');
+      const contactFirstName = contactNameArg.split(' ')[0].toLowerCase();
+      const contactLower = contactNameArg.toLowerCase();
+      
+      for (const row of rows) {
+        const presentations = row.querySelectorAll('[role="presentation"]');
+        
+        for (const pres of presentations) {
+          const textEls = pres.querySelectorAll('[dir="auto"]');
+          
+          for (const el of textEls) {
+            const htmlEl = el as HTMLElement;
+            const text = htmlEl.textContent?.trim() || '';
+            const lowerText = text.toLowerCase();
+            
+            // Skip empty or too short
+            if (!text || text.length < 2) continue;
+            
+            // Skip timestamps
+            if (/^\d{1,2}:\d{2}\s*(AM|PM)?$/i.test(text)) continue;
+            if (/^(yesterday|today)\s*at\s*\d/i.test(text)) continue;
+            if (/^(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s*at\s*\d/i.test(text)) continue;
+            if (/^(December|January|February|March|April|May|June|July|August|September|October|November)\s+\d/i.test(text)) continue;
+            
+            // Skip system messages
+            if (lowerText === 'messages and calls are secured with end-to-end encryption. learn more.') continue;
+            if (lowerText.includes("you're now friends on facebook")) continue;
+            if (lowerText === 'say hi to your new facebook friend.') continue;
+            if (lowerText === 'get started') continue;
+            if (lowerText === 'enter') continue;
+            
+            // Skip exact contact name
+            if (lowerText === contactLower) continue;
+            if (lowerText === contactFirstName && text.length < 20) continue;
+            
+            // Skip UI elements and buttons
+            if (lowerText === 'plus' || lowerText === 'more') continue;
+            if (lowerText === 'répondre' || lowerText === 'reply') continue;
+            
+            // Check line height - messages typically have 15-25px line height
+            const computedStyle = window.getComputedStyle(htmlEl);
+            const lineHeight = parseFloat(computedStyle.lineHeight);
+            // Skip if line height is way off (but allow NaN as some messages don't have explicit line-height)
+            if (!isNaN(lineHeight) && (lineHeight < 15 || lineHeight > 30)) continue;
+            
+            // Determine sender by checking for gray background
+            let isTheirs = false;
+            let parent: HTMLElement | null = htmlEl.parentElement;
+            for (let i = 0; i < 8 && parent; i++) {
+              const bg = window.getComputedStyle(parent).backgroundColor;
+              
+              // Gray = THEIR message
+              if (bg.includes('48, 48, 48') || 
+                  bg.includes('58, 58, 58') || 
+                  bg.includes('36, 37, 38') ||
+                  bg.includes('36, 36, 36') ||
+                  bg.includes('38, 38, 38') ||
+                  bg.includes('228, 230, 235') || 
+                  bg.includes('240, 240, 240')) {
+                isTheirs = true;
+                break;
+              }
+              parent = parent.parentElement;
+            }
+            
+            result.push({
+              sender: isTheirs ? 'THEM' : 'US',
+              content: text,
+            });
+          }
+        }
+      }
+      
+      return result;
+    }, contactName);
+    
+    // Remove duplicates while preserving order
+    const seen = new Set<string>();
+    const unique: Array<{ sender: 'THEM' | 'US'; content: string }> = [];
+    for (const msg of messages) {
+      if (!seen.has(msg.content)) {
+        seen.add(msg.content);
+        unique.push(msg);
+      }
+    }
+    
+    return unique;
+    
+  } catch (err) {
+    console.error('Error extracting recent messages:', err);
+    return [];
+  }
+}
+
+// Load business data from file
+async function getBusinessData(): Promise<{ business: any; services: any[] }> {
+  try {
+    const data = await fs.readFile(BUSINESS_FILE, 'utf-8');
+    return JSON.parse(data);
+  } catch {
+    return {
+      business: {
+        name: 'Our Business',
+        description: 'We provide professional services',
+        location: 'Tunisia',
+        whatsapp: '',
+        website: '',
+        languages: ['French', 'Arabic'],
+        targetAudience: '',
+        uniqueSellingPoints: [],
+      },
+      services: [],
+    };
+  }
+}
+
+// Generate AI reply using conversation history - DIRECT AI call (no HTTP)
+// Returns array of messages to send consecutively
 async function generateAIReply(
   contactName: string,
-  message: string,
+  conversationHistory: { sender: string; text: string }[],
   lead: any,
-  business: any,
-  services: any[]
-): Promise<string | null> {
+): Promise<string[] | null> {
   try {
-    // Call your AI generation endpoint
-    const response = await fetch(`${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/api/ai/generate-reply`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contactName,
-        lastMessage: message,
-        lead,
-        business,
-        services,
-      }),
+    console.log(`[AI] Generating reply for ${contactName} with ${conversationHistory.length} messages`);
+    
+    // Load business data from DB
+    const business = await prisma.business.findFirst();
+    const services = await prisma.service.findMany({ where: { isActive: true } });
+    
+    // Load custom prompt from DB (from ai-tune page)
+    const customPromptSetting = await prisma.setting.findUnique({
+      where: { key: "ai_conversation_prompt" }
+    });
+    const customPrompt = customPromptSetting?.value || null;
+
+    // Format conversation with contact name
+    const formattedConversation = conversationHistory.map(msg => {
+      const sender = msg.sender === 'us' ? 'Us' : contactName;
+      return `${sender}: ${msg.text}`;
+    }).join('\n');
+
+    // Log only last 5 messages for brevity
+    const last5Messages = conversationHistory.slice(-5).map(msg => {
+      const sender = msg.sender === 'us' ? 'Us' : contactName;
+      return `${sender}: ${msg.text}`;
+    }).join('\n');
+    console.log(`[AI] Conversation (${conversationHistory.length} total, showing last 5):\n${last5Messages}`);
+
+    // Check if we already introduced ourselves
+    const weAlreadyIntroduced = conversationHistory.some(m => m.sender === 'us');
+    
+    // Build services info for prompt
+    const servicesInfo = services.map(s => 
+      `- ${s.nameArabic || s.name}: ${s.descriptionArabic || s.description || ''} ${s.priceRange ? `(${s.priceRange})` : ''}`
+    ).join('\n');
+
+    // Build system prompt - use custom from DB if available, else default
+    let systemPrompt: string;
+    
+    if (customPrompt) {
+      // Use custom prompt from ai-tune page + append conversation context
+      systemPrompt = `${customPrompt}
+
+=== معلومات الشركة ===
+اسم الشركة: ${business?.name || 'Creator Labs'}
+الوصف: ${business?.description || ''}
+الموقع: ${business?.location || 'تونس'}
+واتساب: ${business?.whatsapp || ''}
+
+=== الخدمات ===
+${servicesInfo || '- خدمات متنوعة'}
+
+=== المحادثة مع: ${contactName} ===
+${weAlreadyIntroduced ? '⚠️ هذه محادثة مستمرة - عرفنا روحنا من قبل. ما تعاودش تعرف روحك. كمل المحادثة بشكل طبيعي.' : '⚠️ هذه محادثة جديدة - عرف روحك باختصار.'}
+
+${formattedConversation}
+
+=== قواعد إضافية للمحادثة ===
+1. ما تستعملش إيموجي
+2. كل رسالة جملة قصيرة
+3. قسم الرد ل 2-3 رسائل قصار
+4. ${weAlreadyIntroduced ? 'ما تعاودش تعرف روحك - كمل المحادثة طبيعي' : 'عرف روحك باختصار في أول رسالة'}`;
+    } else {
+      // Default prompt if no custom prompt saved
+      systemPrompt = `انت SDR محترف تخدم في ${business?.name || 'Creator Labs'}. تحكي كيف إنسان حقيقي - قصير، طبيعي، بلا تكلف.
+
+=== معلومات الشركة ===
+اسم: ${business?.name || 'Creator Labs'}
+الوصف: ${business?.description || ''}
+الموقع: ${business?.location || 'تونس'}
+واتساب: ${business?.whatsapp || ''}
+
+=== الخدمات ===
+${servicesInfo || '- خدمات متنوعة'}
+
+=== المحادثة مع: ${contactName} ===
+${weAlreadyIntroduced ? '⚠️ هذه محادثة مستمرة - عرفنا روحنا من قبل. ما تعاودش تعرف روحك.' : '⚠️ هذه محادثة جديدة - عرف روحك باختصار.'}
+
+${formattedConversation}
+
+=== القواعد ===
+1. ما تستعملش إيموجي أبدا
+2. احكي بنفس لغة الكليان (تونسي، فرنساوي، انجليزي)
+3. كل رسالة جملة قصيرة
+4. كيف إنسان يكتب - طبيعي، كاجوال
+5. قسم الرد ل 2-3 رسائل قصار
+6. سؤال واحد في كل رد
+7. ما تكونش formal - كون طبيعي
+8. ${weAlreadyIntroduced ? 'ما تعاودش تعرف روحك' : 'عرف روحك في أول رسالة'}`;
+    }
+    
+    console.log(`[AI] Using ${customPrompt ? 'CUSTOM' : 'DEFAULT'} prompt from ai-tune`);
+
+    const result = await generateObject({
+      model,
+      schema: ReplySchema,
+      system: systemPrompt,
+      prompt: `بناء على المحادثة أعلاه مع ${contactName}، اعطيني رسائل قصار متتالية كـ array.`,
     });
 
-    if (!response.ok) {
-      console.error("AI reply generation failed:", await response.text());
-      return null;
-    }
-
-    const data = await response.json();
-    return data.reply || null;
+    console.log(`[AI] Generated ${result.object.messages.length} messages:`);
+    result.object.messages.forEach((m, i) => console.log(`  ${i+1}. "${m}"`));
+    console.log(`[AI] Intent: ${result.object.intent}, Reasoning: ${result.object.reasoning}`);
+    
+    return result.object.messages;
 
   } catch (err) {
-    console.error("Error generating AI reply:", err);
+    console.error("[AI] Error generating reply:", err);
     return null;
+  }
+}
+
+// Dismiss notification popups (like E2EE notice with "Close" button, push notification requests)
+async function dismissNotificationPopup(page: Page, log: (msg: string) => void): Promise<void> {
+  try {
+    // Wait a bit for any popup to fully appear
+    await page.waitForTimeout(500);
+    
+    // Direct approach: Find and click the Close button inside alertdialog
+    const dismissed = await page.evaluate(() => {
+      const results: string[] = [];
+      
+      // Look for the push notifications alertdialog specifically
+      const alertDialog = document.querySelector('[role="alertdialog"]');
+      const pushNotifDialog = document.querySelector('[aria-label="Push notifications request"]');
+      
+      results.push(`alertdialog: ${alertDialog ? 'found' : 'not found'}`);
+      results.push(`pushNotifDialog: ${pushNotifDialog ? 'found' : 'not found'}`);
+      
+      const dialogToUse = alertDialog || pushNotifDialog;
+      
+      if (dialogToUse) {
+        // Find the button inside (it's a plain <button> element)
+        const closeBtn = dialogToUse.querySelector('button');
+        if (closeBtn) {
+          results.push(`button text: "${closeBtn.textContent?.trim()}"`);
+          closeBtn.click();
+          return { clicked: 'alertdialog button', results };
+        }
+      }
+      
+      // Also check for any standalone Close button
+      const allButtons = document.querySelectorAll('button');
+      results.push(`total buttons found: ${allButtons.length}`);
+      
+      for (const btn of allButtons) {
+        const text = btn.textContent?.trim().toLowerCase();
+        if (text === 'close') {
+          btn.click();
+          return { clicked: 'standalone close button', results };
+        }
+      }
+      
+      // Check role="button" divs with Close text
+      const roleButtons = document.querySelectorAll('[role="button"]');
+      results.push(`total role=button found: ${roleButtons.length}`);
+      
+      for (const btn of roleButtons) {
+        const text = btn.textContent?.trim().toLowerCase();
+        if (text === 'close') {
+          (btn as HTMLElement).click();
+          return { clicked: 'role button close', results };
+        }
+      }
+      
+      return { clicked: null, results };
+    });
+
+    // Log what we found
+    if (dismissed.results) {
+      dismissed.results.forEach((r: string) => log(`    ${r}`));
+    }
+    
+    if (dismissed.clicked) {
+      log(`  ✅ Dismissed popup: ${dismissed.clicked}`);
+      await page.waitForTimeout(500);
+    } else {
+      log(`  ℹ️ No popup to dismiss`);
+    }
+    
+    // Fallback: Try pressing Escape key to close any modal
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(300);
+    
+  } catch (err) {
+    // Silently ignore - no popup to dismiss
+    log(`  ⚠️ Popup dismiss error: ${err}`);
   }
 }

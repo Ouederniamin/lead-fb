@@ -522,6 +522,44 @@ export async function POST(request: NextRequest) {
     log(`⚠️ Errors: ${errors.length}`);
     log(`${"═".repeat(50)}\n`);
 
+    // Query database to verify saved data
+    log(`\n${"═".repeat(50)}`);
+    log(`🔍 VERIFYING SAVED DATA FROM DATABASE`);
+    log(`${"═".repeat(50)}`);
+    
+    const savedContacts = await prisma.messengerContact.findMany({
+      where: { accountId },
+      include: {
+        messages: {
+          orderBy: { createdAt: 'asc' },
+        },
+      },
+      orderBy: { lastActivityAt: 'desc' },
+    });
+
+    log(`📁 Found ${savedContacts.length} contacts in database:\n`);
+    
+    for (const contact of savedContacts) {
+      log(`${"─".repeat(40)}`);
+      log(`👤 ${contact.contactName}`);
+      log(`   FB ID: ${contact.contactFbId}`);
+      log(`   State: ${contact.state}`);
+      log(`   Messages: ${contact.messages.length}`);
+      
+      if (contact.messages.length > 0) {
+        log(`   📜 Conversation:`);
+        for (const msg of contact.messages) {
+          const sender = msg.sender === 'US' ? 'Us' : contact.contactName;
+          const content = msg.content.length > 60 ? msg.content.substring(0, 60) + '...' : msg.content;
+          log(`      ${sender}: ${content}`);
+        }
+      }
+    }
+    
+    log(`${"═".repeat(50)}`);
+    log(`✅ DATABASE VERIFICATION COMPLETE`);
+    log(`${"═".repeat(50)}\n`);
+
     // Close browser
     await browser.close();
     browser = null;
@@ -533,6 +571,16 @@ export async function POST(request: NextRequest) {
       validContacts: validConversations.length,
       totalMessages,
       contacts: contactResults,
+      savedContacts: savedContacts.map(c => ({
+        contactName: c.contactName,
+        contactFbId: c.contactFbId,
+        state: c.state,
+        messageCount: c.messages.length,
+        messages: c.messages.map(m => ({
+          sender: m.sender,
+          content: m.content.substring(0, 100),
+        })),
+      })),
       logs,
       errors: errors.length > 0 ? errors : undefined,
     });

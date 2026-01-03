@@ -115,12 +115,10 @@ export default function ConversationTestingPage() {
     newMessagesDetected: 0,
     repliesSent: 0,
   });
-  const [agentInterval, setAgentInterval] = useState(60);
-  const [autoReply, setAutoReply] = useState(false);
+  const [idleTimeout, setIdleTimeout] = useState(120); // Seconds of no new messages before stopping
   const [agentLogs, setAgentLogs] = useState<string[]>([]);
   const [needsReply, setNeedsReply] = useState<{ contactName: string; message: string }[]>([]);
   const [agentLoading, setAgentLoading] = useState(false);
-  const agentIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   // Load accounts
   useEffect(() => {
@@ -159,15 +157,6 @@ export default function ConversationTestingPage() {
     }
     checkPinStatus();
   }, [selectedAccount]);
-
-  // Cleanup agent interval on unmount
-  useEffect(() => {
-    return () => {
-      if (agentIntervalRef.current) {
-        clearInterval(agentIntervalRef.current);
-      }
-    };
-  }, []);
 
   // ==================== PIN FUNCTIONS ====================
 
@@ -370,7 +359,7 @@ export default function ConversationTestingPage() {
 
   // ==================== AGENT TAB ====================
 
-  async function runAgentCycle(): Promise<AgentCycleResult> {
+  async function runAgentCycle(continuous: boolean = false): Promise<AgentCycleResult> {
     addAgentLog(`[${new Date().toLocaleTimeString()}] 🔄 Starting agent cycle...`);
 
     try {
@@ -379,7 +368,7 @@ export default function ConversationTestingPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           accountId: selectedAccount,
-          autoReply,
+          idleTimeout: continuous ? idleTimeout : 0, // 0 = single cycle mode
         }),
       });
 
@@ -443,49 +432,37 @@ export default function ConversationTestingPage() {
       ...prev,
       running: true,
       lastRun: new Date(),
-      nextRun: new Date(Date.now() + agentInterval * 1000),
     }));
 
-    toast.success(`🤖 Agent started! Checking every ${agentInterval}s`);
+    toast.success(`🤖 Agent started! Monitoring until ${idleTimeout}s of inactivity`);
     addAgentLog(`═══════════════════════════════════════════`);
-    addAgentLog(`🤖 AGENT STARTED (interval: ${agentInterval}s)`);
-    addAgentLog(`   Auto-reply: ${autoReply ? "ON" : "OFF"}`);
+    addAgentLog(`🤖 AGENT STARTED (continuous monitoring)`);
+    addAgentLog(`   Idle timeout: ${idleTimeout}s`);
+    addAgentLog(`   Auto-reply: ON (always enabled)`);
     addAgentLog(`═══════════════════════════════════════════`);
 
-    // Run first cycle immediately
-    const result = await runAgentCycle();
+    // Run continuous monitoring cycle - API will keep browser open until idle
+    const result = await runAgentCycle(true);
     updateAgentStats(result);
 
-    // Start interval
-    agentIntervalRef.current = setInterval(async () => {
-      setAgentStatus((prev) => ({
-        ...prev,
-        lastRun: new Date(),
-        nextRun: new Date(Date.now() + agentInterval * 1000),
-        cycleCount: prev.cycleCount + 1,
-      }));
-
-      const cycleResult = await runAgentCycle();
-      updateAgentStats(cycleResult);
-    }, agentInterval * 1000);
-  }
-
-  function stopAgent() {
-    if (agentIntervalRef.current) {
-      clearInterval(agentIntervalRef.current);
-      agentIntervalRef.current = null;
-    }
-
+    // Agent automatically stops when idle timeout is reached
     setAgentStatus((prev) => ({
       ...prev,
       running: false,
     }));
 
-    toast.info("🛑 Agent stopped");
-    addAgentLog(`═══════════════════════════════════════════`);
-    addAgentLog(`🛑 AGENT STOPPED`);
-    addAgentLog(`═══════════════════════════════════════════`);
+    if (result.success) {
+      toast.success(`🔴 Agent stopped after idle timeout`);
+      addAgentLog(`═══════════════════════════════════════════`);
+      addAgentLog(`🔴 AGENT STOPPED (idle timeout reached)`);
+      addAgentLog(`═══════════════════════════════════════════`);
+    } else {
+      toast.error(`Agent stopped with errors`);
+    }
   }
+
+  // Agent will auto-stop when idle timeout is reached
+  // No manual stop needed since the API handles the timeout internally
 
   function updateAgentStats(result: AgentCycleResult) {
     setAgentStatus((prev) => ({
@@ -510,7 +487,7 @@ export default function ConversationTestingPage() {
     setAgentLoading(true);
     toast.info("Running single cycle...");
 
-    const result = await runAgentCycle();
+    const result = await runAgentCycle(false); // Single cycle mode
     updateAgentStats(result);
 
     if (result.success) {
@@ -860,7 +837,8 @@ export default function ConversationTestingPage() {
                   Phase 2: Message Monitoring Agent
                 </CardTitle>
                 <CardDescription>
-                  Continuously monitors Messenger for new messages, compares with DB, and optionally sends AI replies.
+                  Continuously monitors Messenger for new messages and sends AI replies automatically. 
+                  Keeps browser open until no new messages are detected for the idle timeout duration.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -898,27 +876,26 @@ export default function ConversationTestingPage() {
                 {/* Settings */}
                 <div className="grid md:grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <Label>Check Interval (seconds)</Label>
+                    <Label>Idle Timeout (seconds)</Label>
                     <Input
                       type="number"
                       min={30}
                       max={600}
-                      value={agentInterval}
-                      onChange={(e) => setAgentInterval(parseInt(e.target.value) || 60)}
+                      value={idleTimeout}
+                      onChange={(e) => setIdleTimeout(parseInt(e.target.value) || 120)}
                       disabled={agentStatus.running}
                       className="w-32"
                     />
+                    <p className="text-xs text-muted-foreground">
+                      Stop monitoring after no new messages for this duration
+                    </p>
                   </div>
-                  <div className="flex items-center gap-3">
-                    <Switch
-                      checked={autoReply}
-                      onCheckedChange={setAutoReply}
-                      disabled={agentStatus.running}
-                    />
+                  <div className="flex items-center gap-3 p-3 bg-green-500/10 rounded-lg">
+                    <CheckCircle className="w-5 h-5 text-green-500" />
                     <div>
-                      <Label>Auto-Reply with AI</Label>
+                      <Label className="text-green-700 dark:text-green-400">Auto-Reply: Always ON</Label>
                       <p className="text-xs text-muted-foreground">
-                        Automatically send AI-generated replies
+                        AI-generated replies sent automatically to new messages
                       </p>
                     </div>
                   </div>
@@ -928,26 +905,19 @@ export default function ConversationTestingPage() {
 
                 {/* Controls */}
                 <div className="flex gap-3">
-                  {!agentStatus.running ? (
-                    <Button
-                      onClick={startAgent}
-                      disabled={!selectedAccount || !pinHasPin}
-                      size="lg"
-                      className="bg-green-600 hover:bg-green-700"
-                    >
+                  <Button
+                    onClick={startAgent}
+                    disabled={!selectedAccount || !pinHasPin || agentStatus.running}
+                    size="lg"
+                    className="bg-green-600 hover:bg-green-700"
+                  >
+                    {agentStatus.running ? (
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    ) : (
                       <Play className="w-4 h-4 mr-2" />
-                      Start Agent
-                    </Button>
-                  ) : (
-                    <Button
-                      onClick={stopAgent}
-                      size="lg"
-                      variant="destructive"
-                    >
-                      <Square className="w-4 h-4 mr-2" />
-                      Stop Agent
-                    </Button>
-                  )}
+                    )}
+                    {agentStatus.running ? "Monitoring..." : "Start Monitoring"}
+                  </Button>
 
                   <Button
                     onClick={runSingleCycle}
