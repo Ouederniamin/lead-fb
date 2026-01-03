@@ -49,3 +49,5 @@ next-env.d.ts
 /worker/sessions/*.json
 /worker/node_modules/
 /worker/profiles/
+/worker/src/profiles/
+/worker/profiles/
