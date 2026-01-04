@@ -248,26 +248,82 @@ export async function POST(request: NextRequest) {
             log(`    Clicked conversation link`);
             await page.waitForTimeout(2500);
 
-            // Extract recent messages from the open conversation
-            log(`    Extracting recent messages from conversation...`);
-            const recentMessages = await extractRecentMessages(page, msg.contactName);
-            log(`    Found ${recentMessages.length} recent messages in view`);
-
-            // Build set of existing message contents for comparison
+            // ========================================
+            // WAIT FOR MORE MESSAGES PATTERN
+            // Wait 10s after last message before generating AI reply
+            // If new message arrives during wait, reset timer
+            // ========================================
+            const MESSAGE_WAIT_TIME = 10000; // 10 seconds
+            const CHECK_INTERVAL = 2000; // Check every 2 seconds
+            let allCollectedMessages: { sender: 'THEM' | 'US'; content: string }[] = [];
+            let lastMessageCount = 0;
+            let waitStartTime = Date.now();
+            
+            log(`    ⏳ Waiting for more messages (${MESSAGE_WAIT_TIME/1000}s timeout)...`);
+            
+            // Initial extraction
+            let recentMessages = await extractRecentMessages(page, msg.contactName);
             const existingContents = new Set(contact.messages.map(m => m.content));
             
-            // Find NEW messages not in DB
-            const newIncomingMessages: { sender: 'THEM' | 'US'; content: string }[] = [];
+            // Find initial new messages
             for (const rm of recentMessages) {
-              if (!existingContents.has(rm.content)) {
-                newIncomingMessages.push(rm);
+              if (!existingContents.has(rm.content) && rm.sender === 'THEM') {
+                allCollectedMessages.push(rm);
+              }
+            }
+            lastMessageCount = allCollectedMessages.length;
+            log(`    Found ${lastMessageCount} new message(s) initially`);
+            
+            // Keep checking for more messages until 10s of silence
+            while (true) {
+              await page.waitForTimeout(CHECK_INTERVAL);
+              
+              // Re-extract messages
+              recentMessages = await extractRecentMessages(page, msg.contactName);
+              
+              // Find NEW messages not in DB and not already collected
+              const collectedContents = new Set(allCollectedMessages.map(m => m.content));
+              let newMessagesThisCheck = 0;
+              
+              for (const rm of recentMessages) {
+                if (!existingContents.has(rm.content) && !collectedContents.has(rm.content) && rm.sender === 'THEM') {
+                  allCollectedMessages.push(rm);
+                  newMessagesThisCheck++;
+                  log(`    📩 New message detected: "${rm.content.substring(0, 30)}..."`);
+                }
+              }
+              
+              if (newMessagesThisCheck > 0) {
+                // Reset timer - user is still typing
+                waitStartTime = Date.now();
+                lastMessageCount = allCollectedMessages.length;
+                log(`    ⏳ New message! Resetting 10s timer... (${allCollectedMessages.length} total)`);
+              }
+              
+              // Check if 10 seconds passed since last message
+              const elapsed = Date.now() - waitStartTime;
+              if (elapsed >= MESSAGE_WAIT_TIME) {
+                log(`    ✅ 10s silence - user finished typing. Total: ${allCollectedMessages.length} message(s)`);
+                break;
+              }
+              
+              // Safety: max 60 seconds total wait
+              if (allCollectedMessages.length > 0 && elapsed >= 60000) {
+                log(`    ⏰ Max wait time reached (60s). Proceeding...`);
+                break;
               }
             }
             
-            log(`    ${newIncomingMessages.length} new messages to save`);
+            // If no new messages found after waiting, skip
+            if (allCollectedMessages.length === 0) {
+              log(`    No new messages to respond to, skipping...`);
+              continue;
+            }
+            
+            log(`    ${allCollectedMessages.length} new messages to save and respond to`);
             
             // Save all new incoming messages to database
-            for (const newMsg of newIncomingMessages) {
+            for (const newMsg of allCollectedMessages) {
               await prisma.messengerMessage.create({
                 data: {
                   contactId: msg.contactId,
@@ -285,7 +341,7 @@ export async function POST(request: NextRequest) {
             }));
             
             // Add new messages to history
-            for (const newMsg of newIncomingMessages) {
+            for (const newMsg of allCollectedMessages) {
               conversationHistory.push({
                 sender: newMsg.sender === 'US' ? 'us' : 'them',
                 text: newMsg.content,

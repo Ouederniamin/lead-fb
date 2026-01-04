@@ -1,4 +1,3 @@
-// Business Profile for Creator Labs
 export const businessData = {
   id: 'creatorlabs',
   name: 'Creator Labs',

@@ -16,6 +16,58 @@ import { shouldAgentRun } from "@/lib/schedule-service";
 import { prisma } from "@/lib/db";
 import { Page } from "playwright";
 
+// Helper function to create session notifications
+async function createSessionNotification(
+  accountId: string, 
+  type: "SESSION_EXPIRED" | "SESSION_NEEDS_LOGIN" | "ACCOUNT_BANNED" | "AGENT_ERROR",
+  message: string
+) {
+  try {
+    const account = await prisma.account.findUnique({
+      where: { id: accountId },
+      select: { name: true, email: true },
+    });
+
+    const accountName = account?.name || account?.email || "Unknown Account";
+    
+    const notificationData: Record<string, { title: string; severity: "WARNING" | "ERROR" | "CRITICAL"; sessionStatus: string }> = {
+      SESSION_EXPIRED: { title: "Session Expired", severity: "WARNING", sessionStatus: "EXPIRED" },
+      SESSION_NEEDS_LOGIN: { title: "Re-login Required", severity: "ERROR", sessionStatus: "NEEDS_PASSWORD" },
+      ACCOUNT_BANNED: { title: "Account Banned", severity: "CRITICAL", sessionStatus: "BANNED" },
+      AGENT_ERROR: { title: "Agent Error", severity: "ERROR", sessionStatus: "ERROR" },
+    };
+
+    const config = notificationData[type];
+    if (!config) return;
+
+    await prisma.account.update({
+      where: { id: accountId },
+      data: {
+        sessionStatus: config.sessionStatus as any,
+        sessionError: message,
+        sessionExpiredAt: new Date(),
+        isLoggedIn: false,
+      },
+    });
+
+    await prisma.notification.create({
+      data: {
+        type: type as any,
+        severity: config.severity as any,
+        title: `${config.title}: ${accountName}`,
+        message,
+        accountId,
+        actionUrl: "/dashboard/accounts",
+        actionLabel: "Fix Account",
+      },
+    });
+    
+    console.log(`[Notification] Created: ${config.title} for ${accountName}`);
+  } catch (err) {
+    console.error("[Notification] Failed to create:", err);
+  }
+}
+
 export interface LeadGenInput {
   accountId: string;
   groups: Array<{
@@ -747,6 +799,12 @@ export async function runLeadGenAgent(
     // Warmup session
     const isLoggedIn = await warmupSession(session.page, log);
     if (!isLoggedIn) {
+      log("❌ Account is not logged in - creating notification");
+      await createSessionNotification(
+        input.accountId,
+        "SESSION_NEEDS_LOGIN",
+        "Facebook session expired. Please re-login manually to continue using this account."
+      );
       throw new Error("Account is not logged in");
     }
 
