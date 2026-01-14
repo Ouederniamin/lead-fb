@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   Play,
   Loader2,
@@ -24,6 +25,8 @@ import {
   Target,
   Bot,
   ExternalLink,
+  StopCircle,
+  AlertTriangle,
 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -37,6 +40,16 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Progress } from "@/components/ui/progress";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { toast } from "sonner";
 
 interface Account {
@@ -121,6 +134,49 @@ export default function AgentTestingPage() {
   // Message Agent inputs
   const [idleTimeoutUnread, setIdleTimeoutUnread] = useState(120);
   const [idleTimeoutConversation, setIdleTimeoutConversation] = useState(60);
+
+  // Running agent tracking - prevents navigation when agent is active
+  const [runningAgent, setRunningAgent] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState("initializer");
+  const [showNavigationWarning, setShowNavigationWarning] = useState(false);
+  const [pendingTab, setPendingTab] = useState<string | null>(null);
+  const router = useRouter();
+
+  // Block browser navigation (refresh, close, back) when agent is running
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (runningAgent) {
+        e.preventDefault();
+        e.returnValue = "An agent is currently running. Are you sure you want to leave?";
+        return e.returnValue;
+      }
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [runningAgent]);
+
+  // Handle tab change - block if agent is running
+  const handleTabChange = useCallback((newTab: string) => {
+    if (runningAgent && newTab !== activeTab) {
+      setPendingTab(newTab);
+      setShowNavigationWarning(true);
+      return;
+    }
+    setActiveTab(newTab);
+  }, [runningAgent, activeTab]);
+
+  // Force stop current agent (placeholder - agents don't support abort yet)
+  const forceStopAgent = useCallback(() => {
+    toast.warning("Agent will stop after current operation completes. Browser may still be open.");
+    setRunningAgent(null);
+    setLoading(false);
+    setShowNavigationWarning(false);
+    if (pendingTab) {
+      setActiveTab(pendingTab);
+      setPendingTab(null);
+    }
+  }, [pendingTab]);
 
   // Load accounts
   useEffect(() => {
@@ -265,6 +321,7 @@ export default function AgentTestingPage() {
     }
 
     setLoading(true);
+    setRunningAgent("Group Initializer");
     setLogs([]);
     setResult(null);
 
@@ -302,6 +359,7 @@ export default function AgentTestingPage() {
       console.error(error);
     } finally {
       setLoading(false);
+      setRunningAgent(null);
     }
   }
 
@@ -313,6 +371,7 @@ export default function AgentTestingPage() {
     }
 
     setLoading(true);
+    setRunningAgent("Scraper Agent");
     setLogs([]);
     setResult(null);
 
@@ -342,6 +401,7 @@ export default function AgentTestingPage() {
       console.error(error);
     } finally {
       setLoading(false);
+      setRunningAgent(null);
     }
   }
 
@@ -362,6 +422,7 @@ export default function AgentTestingPage() {
     }
 
     setLoading(true);
+    setRunningAgent("Initiator Agent");
     setLogs([]);
     setResult(null);
     setExecutionProgress(0);
@@ -402,6 +463,7 @@ export default function AgentTestingPage() {
       console.error(error);
     } finally {
       setLoading(false);
+      setRunningAgent(null);
     }
   }
 
@@ -413,6 +475,7 @@ export default function AgentTestingPage() {
     }
 
     setLoading(true);
+    setRunningAgent("Message Agent");
     setLogs([]);
     setResult(null);
 
@@ -443,6 +506,7 @@ export default function AgentTestingPage() {
       console.error(error);
     } finally {
       setLoading(false);
+      setRunningAgent(null);
     }
   }
 
@@ -454,6 +518,7 @@ export default function AgentTestingPage() {
     }
 
     setLoading(true);
+    setRunningAgent("Conversation Init");
     setLogs([]);
     setConvInitResult(null);
 
@@ -483,11 +548,68 @@ export default function AgentTestingPage() {
       console.error(error);
     } finally {
       setLoading(false);
+      setRunningAgent(null);
     }
   }
 
   return (
     <div className="space-y-6">
+      {/* Navigation Warning Dialog */}
+      <AlertDialog open={showNavigationWarning} onOpenChange={setShowNavigationWarning}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2 text-yellow-600">
+              <AlertTriangle className="w-5 h-5" />
+              Agent Running
+            </AlertDialogTitle>
+            <AlertDialogDescription className="space-y-2">
+              <p>
+                <strong>{runningAgent}</strong> is currently running. 
+                Navigating away may leave the browser open or cause issues.
+              </p>
+              <p className="text-yellow-600">
+                Please wait for the agent to finish or stop it before switching tabs.
+              </p>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => setPendingTab(null)}>
+              Stay Here
+            </AlertDialogCancel>
+            <AlertDialogAction 
+              onClick={forceStopAgent}
+              className="bg-red-600 hover:bg-red-700"
+            >
+              <StopCircle className="w-4 h-4 mr-2" />
+              Stop Agent & Navigate
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Running Agent Banner */}
+      {runningAgent && (
+        <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <Loader2 className="w-5 h-5 animate-spin text-yellow-600" />
+            <div>
+              <p className="font-medium text-yellow-600">{runningAgent} is running...</p>
+              <p className="text-sm text-muted-foreground">
+                Do not close this page or switch tabs until the agent finishes.
+              </p>
+            </div>
+          </div>
+          <Button 
+            variant="destructive" 
+            size="sm" 
+            onClick={forceStopAgent}
+          >
+            <StopCircle className="w-4 h-4 mr-2" />
+            Force Stop
+          </Button>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -528,25 +650,25 @@ export default function AgentTestingPage() {
       </Card>
 
       {/* Agent Tabs */}
-      <Tabs defaultValue="initializer" className="space-y-4">
+      <Tabs value={activeTab} onValueChange={handleTabChange} className="space-y-4">
         <TabsList className="flex w-full h-10">
-          <TabsTrigger value="initializer" className="flex-1">
+          <TabsTrigger value="initializer" className="flex-1" disabled={loading}>
             <Database className="w-4 h-4 mr-2" />
             Group Init
           </TabsTrigger>
-          <TabsTrigger value="conv-init" className="flex-1">
+          <TabsTrigger value="conv-init" className="flex-1" disabled={loading}>
             <RefreshCw className="w-4 h-4 mr-2" />
             Conv Init
           </TabsTrigger>
-          <TabsTrigger value="scraper" className="flex-1">
+          <TabsTrigger value="scraper" className="flex-1" disabled={loading}>
             <Search className="w-4 h-4 mr-2" />
             Scraper
           </TabsTrigger>
-          <TabsTrigger value="initiator" className="flex-1" onClick={() => loadLeads()}>
+          <TabsTrigger value="initiator" className="flex-1" disabled={loading} onClick={() => !loading && loadLeads()}>
             <Zap className="w-4 h-4 mr-2" />
             Initiator
           </TabsTrigger>
-          <TabsTrigger value="message" className="flex-1">
+          <TabsTrigger value="message" className="flex-1" disabled={loading}>
             <MessageSquare className="w-4 h-4 mr-2" />
             Message
           </TabsTrigger>
