@@ -676,32 +676,54 @@ async function extractRecentMessages(page: Page, contactName: string): Promise<A
             // Skip empty or too short
             if (!text || text.length < 2) continue;
             
-            // Skip timestamps
+            // Skip timestamps - various formats
+            // Format: "12/28/25, 11:11 PM" or "1/3/26, 8:26 AM"
+            if (/^\d{1,2}\/\d{1,2}\/\d{2,4},?\s*\d{1,2}:\d{2}\s*(AM|PM)?$/i.test(text)) continue;
+            // Format: "Jan 2, 2026, 1:43 AM" or "Dec 28, 2025, 11:11 PM"
+            if (/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s*\d{4},?\s*\d{1,2}:\d{2}\s*(AM|PM)?$/i.test(text)) continue;
+            // Format: "11:11 PM" or "1:43 AM"
             if (/^\d{1,2}:\d{2}\s*(AM|PM)?$/i.test(text)) continue;
+            // Format: "yesterday at 1:43 PM"
             if (/^(yesterday|today)\s*at\s*\d/i.test(text)) continue;
+            // Format: "Monday at 1:43 PM"
             if (/^(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s*at\s*\d/i.test(text)) continue;
+            // Format: "December 28" or "January 3"
             if (/^(December|January|February|March|April|May|June|July|August|September|October|November)\s+\d/i.test(text)) continue;
             
-            // Skip system messages
+            // Skip system/UI messages
             if (lowerText === 'messages and calls are secured with end-to-end encryption. learn more.') continue;
             if (lowerText.includes("you're now friends on facebook")) continue;
             if (lowerText === 'say hi to your new facebook friend.') continue;
             if (lowerText === 'get started') continue;
             if (lowerText === 'enter') continue;
+            if (lowerText === 'you sent') continue;
+            if (lowerText === 'sent') continue;
+            if (lowerText.startsWith('you sent')) continue;
+            if (lowerText === 'replying to') continue;
+            if (lowerText.startsWith('replying to')) continue;
             
-            // Skip exact contact name
+            // Skip exact contact name or parts of it
             if (lowerText === contactLower) continue;
-            if (lowerText === contactFirstName && text.length < 20) continue;
+            if (lowerText === contactFirstName) continue;
+            // Skip if text is just the contact's first or last name (short match)
+            const nameParts = contactNameArg.toLowerCase().split(' ');
+            if (nameParts.some(part => part.length > 2 && lowerText === part)) continue;
             
             // Skip UI elements and buttons
             if (lowerText === 'plus' || lowerText === 'more') continue;
             if (lowerText === 'répondre' || lowerText === 'reply') continue;
+            if (lowerText === 'see more' || lowerText === 'voir plus') continue;
+            if (lowerText === 'view' || lowerText === 'voir') continue;
             
-            // Check line height - messages typically have 15-25px line height
+            // Skip if it looks like a timestamp with date (contains "/" or "," with numbers)
+            if (/^\d{1,2}\/\d{1,2}/.test(text)) continue;
+            if (/^[A-Z][a-z]{2}\s+\d/.test(text) && text.includes(',')) continue;
+            
+            // Check line height - messages have EXACTLY 19.9-20.0px line height
+            // This is the KEY filter that removes timestamps, contact names, and UI elements
             const computedStyle = window.getComputedStyle(htmlEl);
             const lineHeight = parseFloat(computedStyle.lineHeight);
-            // Skip if line height is way off (but allow NaN as some messages don't have explicit line-height)
-            if (!isNaN(lineHeight) && (lineHeight < 15 || lineHeight > 30)) continue;
+            if (isNaN(lineHeight) || lineHeight < 19.9 || lineHeight > 20.0) continue;
             
             // Determine sender by checking for gray background
             let isTheirs = false;
