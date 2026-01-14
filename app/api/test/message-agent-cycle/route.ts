@@ -14,11 +14,11 @@ const PIN_DIALOG_SELECTOR = '[role="dialog"] input[aria-label="PIN"][autocomplet
 // Business data file path
 const BUSINESS_FILE = path.join(process.cwd(), 'data', 'business.json');
 
-// Reply schema for AI generation - now returns array of messages
+// Reply schema for AI generation - dynamic message count (1-3 messages)
 const ReplySchema = z.object({
-  messages: z.array(z.string()).describe("Array of short messages to send consecutively. Each message should be 1-2 sentences max. Split your reply into multiple natural messages like a real chat conversation."),
+  messages: z.array(z.string()).min(1).max(3).describe("Array of messages to send. PREFER sending just 1 concise message when possible. Only split into 2-3 messages if the response genuinely requires it (e.g., asking multiple questions, or providing info then asking something). Each message should be short and natural."),
   intent: z.enum(['greeting', 'qualify', 'propose', 'close', 'follow_up', 'objection_handling']).describe("The intent of this reply"),
-  reasoning: z.string().describe("Why this reply was chosen"),
+  reasoning: z.string().describe("Why this reply was chosen and why this number of messages"),
 });
 
 // System messages to filter out
@@ -860,9 +860,10 @@ ${formattedConversation}
 
 === قواعد إضافية للمحادثة ===
 1. ما تستعملش إيموجي
-2. كل رسالة جملة قصيرة
-3. قسم الرد ل 2-3 رسائل قصار
-4. ${weAlreadyIntroduced ? 'ما تعاودش تعرف روحك - كمل المحادثة طبيعي' : 'عرف روحك باختصار في أول رسالة'}`;
+2. حاول تبعث رسالة وحدة قصيرة ومختصرة
+3. قسم الرد لعدة رسائل كان لازم برك (مثلا: معلومة + سؤال)
+4. ${weAlreadyIntroduced ? 'ما تعاودش تعرف روحك - كمل المحادثة طبيعي' : 'عرف روحك باختصار في أول رسالة'}
+5. سؤال واحد فقط في كل رد`;
     } else {
       // Default prompt if no custom prompt saved
       systemPrompt = `انت SDR محترف تخدم في ${business?.name || 'Creator Labs'}. تحكي كيف إنسان حقيقي - قصير، طبيعي، بلا تكلف.
@@ -884,10 +885,10 @@ ${formattedConversation}
 === القواعد ===
 1. ما تستعملش إيموجي أبدا
 2. احكي بنفس لغة الكليان (تونسي، فرنساوي، انجليزي)
-3. كل رسالة جملة قصيرة
+3. حاول تبعث رسالة وحدة قصيرة ومختصرة
 4. كيف إنسان يكتب - طبيعي، كاجوال
-5. قسم الرد ل 2-3 رسائل قصار
-6. سؤال واحد في كل رد
+5. قسم الرد لعدة رسائل كان لازم برك (معلومة + سؤال)
+6. سؤال واحد فقط في كل رد
 7. ما تكونش formal - كون طبيعي
 8. ${weAlreadyIntroduced ? 'ما تعاودش تعرف روحك' : 'عرف روحك في أول رسالة'}`;
     }
@@ -898,7 +899,7 @@ ${formattedConversation}
       model,
       schema: ReplySchema,
       system: systemPrompt,
-      prompt: `بناء على المحادثة أعلاه مع ${contactName}، اعطيني رسائل قصار متتالية كـ array.`,
+      prompt: `بناء على المحادثة أعلاه مع ${contactName}، اعطيني رد مختصر. حاول تكون رسالة وحدة، وقسمها لعدة رسائل كان الرد يحتاج.`,
     });
 
     console.log(`[AI] Generated ${result.object.messages.length} messages:`);
