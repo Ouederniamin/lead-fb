@@ -27,6 +27,11 @@ import {
   ExternalLink,
   StopCircle,
   AlertTriangle,
+  Lock,
+  Save,
+  Trash2,
+  Rocket,
+  Key,
 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -86,6 +91,49 @@ interface AIPreview {
   loading: boolean;
 }
 
+// Message Agent interfaces
+interface ConversationState {
+  id: string;
+  contactName: string;
+  contactFbId: string;
+  conversationUrl: string;
+  state: string;
+  lastTheirMessage?: string;
+  lastMessageIsOurs?: boolean;
+  lastCheckedAt: string;
+  messageCount?: number;
+}
+
+interface MsgInitProgress {
+  phase: "idle" | "checking-pin" | "scanning" | "opening" | "complete" | "error";
+  currentContact?: string;
+  totalContacts: number;
+  processedContacts: number;
+  savedMessages: number;
+  pinEntered: boolean;
+  errors: string[];
+}
+
+interface MsgAgentStatus {
+  running: boolean;
+  lastRun?: Date;
+  nextRun?: Date;
+  cycleCount: number;
+  totalChecked: number;
+  newMessagesDetected: number;
+  repliesSent: number;
+}
+
+interface MsgAgentCycleResult {
+  success: boolean;
+  checked: number;
+  pinEntered?: boolean;
+  newMessages: { contactName: string; message: string }[];
+  repliesSent: { contactName: string; reply: string }[];
+  errors: string[];
+  logs: string[];
+}
+
 export default function AgentTestingPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [selectedAccount, setSelectedAccount] = useState<string>("");
@@ -134,6 +182,38 @@ export default function AgentTestingPage() {
   // Message Agent inputs
   const [idleTimeoutUnread, setIdleTimeoutUnread] = useState(120);
   const [idleTimeoutConversation, setIdleTimeoutConversation] = useState(60);
+
+  // Message Agent - PIN State
+  const [msgPinValue, setMsgPinValue] = useState<string>("");
+  const [msgPinHasPin, setMsgPinHasPin] = useState<boolean>(false);
+  const [msgPinSaving, setMsgPinSaving] = useState(false);
+
+  // Message Agent - Init State
+  const [msgInitProgress, setMsgInitProgress] = useState<MsgInitProgress>({
+    phase: "idle",
+    totalContacts: 0,
+    processedContacts: 0,
+    savedMessages: 0,
+    pinEntered: false,
+    errors: [],
+  });
+  const [msgInitContacts, setMsgInitContacts] = useState<ConversationState[]>([]);
+  const [msgInitScrollCount, setMsgInitScrollCount] = useState(5);
+  const [msgInitRunning, setMsgInitRunning] = useState(false);
+  const [msgInitLogs, setMsgInitLogs] = useState<string[]>([]);
+
+  // Message Agent - Agent State
+  const [msgAgentStatus, setMsgAgentStatus] = useState<MsgAgentStatus>({
+    running: false,
+    cycleCount: 0,
+    totalChecked: 0,
+    newMessagesDetected: 0,
+    repliesSent: 0,
+  });
+  const [msgIdleTimeout, setMsgIdleTimeout] = useState(120);
+  const [msgAgentLogs, setMsgAgentLogs] = useState<string[]>([]);
+  const [msgNeedsReply, setMsgNeedsReply] = useState<{ contactName: string; message: string }[]>([]);
+  const [msgAgentLoading, setMsgAgentLoading] = useState(false);
 
   // Running agent tracking - prevents navigation when agent is active
   const [runningAgent, setRunningAgent] = useState<string | null>(null);
@@ -212,6 +292,25 @@ export default function AgentTestingPage() {
     }
     loadGroups();
   }, []);
+
+  // Check Message Agent PIN status when account changes
+  useEffect(() => {
+    async function checkPinStatus() {
+      if (!selectedAccount) return;
+      try {
+        const res = await fetch("/api/test/conversation-pin", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ accountId: selectedAccount, action: "status" }),
+        });
+        const data = await res.json();
+        setMsgPinHasPin(data.hasPin || false);
+      } catch {
+        console.error("Failed to check PIN status");
+      }
+    }
+    checkPinStatus();
+  }, [selectedAccount]);
 
   // Load leads with more details
   async function loadLeads() {
@@ -467,7 +566,7 @@ export default function AgentTestingPage() {
     }
   }
 
-  // Run Message Agent
+  // Run Message Agent (old version - keeping for backwards compatibility)
   async function runMessageAgent() {
     if (!selectedAccount) {
       toast.error("Select an account");
@@ -508,6 +607,373 @@ export default function AgentTestingPage() {
       setLoading(false);
       setRunningAgent(null);
     }
+  }
+
+  // ==================== MESSAGE AGENT FUNCTIONS ====================
+
+  // Save PIN for Message Agent
+  async function saveMsgPIN() {
+    if (!selectedAccount) {
+      toast.error("Select an account");
+      return;
+    }
+
+    if (!msgPinValue || msgPinValue.length !== 6 || !/^\d{6}$/.test(msgPinValue)) {
+      toast.error("PIN must be exactly 6 digits");
+      return;
+    }
+
+    setMsgPinSaving(true);
+    try {
+      const res = await fetch("/api/test/conversation-pin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          accountId: selectedAccount,
+          action: "save",
+          newPin: msgPinValue,
+        }),
+      });
+
+      const data = await res.json();
+      if (data.success) {
+        toast.success("PIN saved successfully");
+        setMsgPinHasPin(true);
+        setMsgPinValue("");
+      } else {
+        toast.error(data.error || "Failed to save PIN");
+      }
+    } catch {
+      toast.error("Failed to save PIN");
+    } finally {
+      setMsgPinSaving(false);
+    }
+  }
+
+  // Reset all conversations for Message Agent
+  async function resetMsgConversations() {
+    if (!selectedAccount) {
+      toast.error("Select an account");
+      return;
+    }
+
+    if (!confirm("Are you sure you want to delete ALL conversations for this account? This cannot be undone.")) {
+      return;
+    }
+
+    setMsgInitRunning(true);
+    try {
+      const res = await fetch(`/api/test/conversation-init?accountId=${selectedAccount}`, {
+        method: "DELETE",
+      });
+
+      const data = await res.json();
+
+      if (data.success) {
+        toast.success(`Deleted ${data.deleted.contacts} contacts and ${data.deleted.messages} messages`);
+        addMsgInitLog(`🗑️ Reset complete: Deleted ${data.deleted.contacts} contacts and ${data.deleted.messages} messages`);
+        setMsgInitContacts([]);
+        setMsgInitProgress({
+          phase: "idle",
+          totalContacts: 0,
+          processedContacts: 0,
+          savedMessages: 0,
+          pinEntered: false,
+          errors: [],
+        });
+      } else {
+        toast.error(data.error || "Failed to reset");
+      }
+    } catch {
+      toast.error("Failed to reset conversations");
+    } finally {
+      setMsgInitRunning(false);
+    }
+  }
+
+  // Run Message Agent Init
+  async function runMsgInit() {
+    if (!selectedAccount) {
+      toast.error("Select an account");
+      return;
+    }
+
+    if (!msgPinHasPin) {
+      toast.error("Please configure PIN first for E2EE conversations");
+      return;
+    }
+
+    setMsgInitRunning(true);
+    setRunningAgent("Message Agent Init");
+    setMsgInitLogs([]);
+    setMsgInitContacts([]);
+    setMsgInitProgress({
+      phase: "checking-pin",
+      totalContacts: 0,
+      processedContacts: 0,
+      savedMessages: 0,
+      pinEntered: false,
+      errors: [],
+    });
+
+    try {
+      toast.info("🚀 Starting initialization...");
+      addMsgInitLog("═══════════════════════════════════════════");
+      addMsgInitLog("🚀 INITIALIZATION STARTED");
+      addMsgInitLog("═══════════════════════════════════════════");
+
+      addMsgInitLog("🔐 Step 1: Opening Messenger & checking for E2EE PIN...");
+      
+      const res = await fetch("/api/test/conversation-init", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          accountId: selectedAccount,
+          scrollCount: msgInitScrollCount,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (data.pinEntered) {
+        addMsgInitLog("  ✅ E2EE PIN entered successfully");
+        setMsgInitProgress((prev) => ({ ...prev, pinEntered: true }));
+      } else {
+        addMsgInitLog("  ℹ️ No PIN dialog appeared");
+      }
+
+      if (!data.success) {
+        throw new Error(data.errors?.[0] || "Init failed");
+      }
+
+      setMsgInitProgress((prev) => ({
+        ...prev,
+        phase: "scanning",
+      }));
+      addMsgInitLog("");
+      addMsgInitLog("📋 Step 2: Scanning sidebar for all contacts...");
+      addMsgInitLog(`  ✅ Found ${data.totalContacts} conversations in sidebar`);
+      addMsgInitLog(`  ✅ After filtering: ${data.validContacts} valid contacts`);
+
+      setMsgInitContacts(data.contacts || []);
+      setMsgInitProgress((prev) => ({
+        ...prev,
+        phase: "opening",
+        totalContacts: data.validContacts || 0,
+      }));
+
+      if (data.contacts && data.contacts.length > 0) {
+        addMsgInitLog("");
+        addMsgInitLog("💬 Step 3: Saving conversation history...");
+        
+        for (let i = 0; i < data.contacts.length; i++) {
+          const contact = data.contacts[i];
+          addMsgInitLog(`  → ${contact.contactName}: ${contact.messageCount || 0} messages saved`);
+          setMsgInitProgress((prev) => ({
+            ...prev,
+            processedContacts: i + 1,
+            savedMessages: prev.savedMessages + (contact.messageCount || 0),
+          }));
+        }
+      }
+
+      setMsgInitProgress((prev) => ({
+        ...prev,
+        phase: "complete",
+        processedContacts: data.validContacts || 0,
+        savedMessages: data.totalMessages || 0,
+      }));
+
+      addMsgInitLog("");
+      addMsgInitLog("═══════════════════════════════════════════");
+      addMsgInitLog("🎉 INITIALIZATION COMPLETE!");
+      addMsgInitLog(`   📊 Contacts: ${data.validContacts || 0}`);
+      addMsgInitLog(`   💬 Messages saved: ${data.totalMessages || 0}`);
+      addMsgInitLog("═══════════════════════════════════════════");
+
+      toast.success(`Init complete! ${data.validContacts || 0} contacts processed`);
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : "Unknown error";
+      setMsgInitProgress((prev) => ({
+        ...prev,
+        phase: "error",
+        errors: [...prev.errors, errMsg],
+      }));
+      toast.error(errMsg);
+      addMsgInitLog(`❌ ERROR: ${errMsg}`);
+    } finally {
+      setMsgInitRunning(false);
+      setRunningAgent(null);
+    }
+  }
+
+  // Run Message Agent Cycle
+  async function runMsgAgentCycle(continuous: boolean = false): Promise<MsgAgentCycleResult> {
+    addMsgAgentLog(`[${new Date().toLocaleTimeString()}] 🔄 Starting agent cycle...`);
+
+    try {
+      const res = await fetch("/api/test/message-agent-cycle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          accountId: selectedAccount,
+          idleTimeout: continuous ? msgIdleTimeout : 0,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (data.pinEntered) {
+        addMsgAgentLog(`  🔐 E2EE PIN entered successfully`);
+      }
+
+      if (data.success) {
+        addMsgAgentLog(`  ✅ Checked ${data.checked} conversations`);
+
+        if (data.newMessages?.length > 0) {
+          for (const msg of data.newMessages) {
+            addMsgAgentLog(`  📨 NEW: ${msg.contactName}: "${msg.message.substring(0, 50)}..."`);
+          }
+          setMsgNeedsReply(data.newMessages);
+        }
+
+        if (data.repliesSent?.length > 0) {
+          for (const reply of data.repliesSent) {
+            addMsgAgentLog(`  ✉️ SENT: ${reply.contactName}: "${reply.reply.substring(0, 50)}..."`);
+          }
+        }
+
+        if (data.newMessages?.length === 0 && data.repliesSent?.length === 0) {
+          addMsgAgentLog(`  📭 No new messages`);
+        }
+      } else {
+        addMsgAgentLog(`  ❌ Error: ${data.errors?.[0] || "Unknown"}`);
+      }
+
+      return data;
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : "Unknown error";
+      addMsgAgentLog(`  ❌ Error: ${errMsg}`);
+      return {
+        success: false,
+        checked: 0,
+        newMessages: [],
+        repliesSent: [],
+        errors: [errMsg],
+        logs: [],
+      };
+    }
+  }
+
+  // Start Message Agent (continuous monitoring)
+  async function startMsgAgent() {
+    if (!selectedAccount) {
+      toast.error("Select an account");
+      return;
+    }
+
+    if (!msgPinHasPin) {
+      toast.error("Please configure PIN first for E2EE conversations");
+      return;
+    }
+
+    setMsgAgentStatus((prev) => ({
+      ...prev,
+      running: true,
+      lastRun: new Date(),
+    }));
+    setRunningAgent("Message Agent");
+
+    toast.success(`🤖 Agent started! Monitoring until ${msgIdleTimeout}s of inactivity`);
+    addMsgAgentLog(`═══════════════════════════════════════════`);
+    addMsgAgentLog(`🤖 AGENT STARTED (continuous monitoring)`);
+    addMsgAgentLog(`   Idle timeout: ${msgIdleTimeout}s`);
+    addMsgAgentLog(`   Auto-reply: ON (always enabled)`);
+    addMsgAgentLog(`═══════════════════════════════════════════`);
+
+    const result = await runMsgAgentCycle(true);
+    updateMsgAgentStats(result);
+
+    setMsgAgentStatus((prev) => ({
+      ...prev,
+      running: false,
+    }));
+    setRunningAgent(null);
+
+    if (result.success) {
+      toast.success(`🔴 Agent stopped after idle timeout`);
+      addMsgAgentLog(`═══════════════════════════════════════════`);
+      addMsgAgentLog(`🔴 AGENT STOPPED (idle timeout reached)`);
+      addMsgAgentLog(`═══════════════════════════════════════════`);
+    } else {
+      toast.error(`Agent stopped with errors`);
+    }
+  }
+
+  // Run single Message Agent cycle
+  async function runSingleMsgCycle() {
+    if (!selectedAccount) {
+      toast.error("Select an account");
+      return;
+    }
+
+    if (!msgPinHasPin) {
+      toast.error("Please configure PIN first for E2EE conversations");
+      return;
+    }
+
+    setMsgAgentLoading(true);
+    setRunningAgent("Message Agent (Single)");
+    toast.info("Running single cycle...");
+
+    const result = await runMsgAgentCycle(false);
+    updateMsgAgentStats(result);
+
+    if (result.success) {
+      toast.success(`Checked ${result.checked} conversations`);
+    } else {
+      toast.error(result.errors?.[0] || "Cycle failed");
+    }
+
+    setMsgAgentLoading(false);
+    setRunningAgent(null);
+  }
+
+  // Update Message Agent stats
+  function updateMsgAgentStats(result: MsgAgentCycleResult) {
+    setMsgAgentStatus((prev) => ({
+      ...prev,
+      totalChecked: prev.totalChecked + result.checked,
+      newMessagesDetected: prev.newMessagesDetected + (result.newMessages?.length || 0),
+      repliesSent: prev.repliesSent + (result.repliesSent?.length || 0),
+    }));
+  }
+
+  // Add log to Message Agent init logs
+  function addMsgInitLog(msg: string) {
+    setMsgInitLogs((prev) => [...prev, msg]);
+  }
+
+  // Add log to Message Agent agent logs
+  function addMsgAgentLog(msg: string) {
+    setMsgAgentLogs((prev) => [...prev.slice(-100), msg]);
+  }
+
+  // Render state badge for Message Agent
+  function renderMsgStateBadge(state: string) {
+    const colors: Record<string, string> = {
+      INITIALIZED: "bg-gray-500",
+      NEEDS_REPLY: "bg-red-500",
+      REPLIED: "bg-green-500",
+      QUALIFIED: "bg-blue-500",
+      NOT_INTERESTED: "bg-yellow-500",
+      ENDED: "bg-gray-400",
+    };
+    return (
+      <Badge className={`${colors[state] || "bg-gray-500"} text-white text-xs`}>
+        {state}
+      </Badge>
+    );
   }
 
   // Run Conversation Initialization
@@ -1593,102 +2059,517 @@ export default function AgentTestingPage() {
         {/* ===== MESSAGE AGENT ===== */}
         <TabsContent value="message">
           <div className="space-y-4">
+            {/* PIN Configuration Card */}
             <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <MessageSquare className="w-5 h-5 text-purple-500" />
-                  💬 Message Agent
+              <CardHeader className="pb-3">
+                <CardTitle className="text-lg flex items-center gap-2">
+                  <Lock className="w-5 h-5 text-purple-500" />
+                  E2EE PIN Configuration
                 </CardTitle>
-                <CardDescription>
-                  Monitors Messenger for replies, generates AI responses with full lead context,
-                  and extracts contact info (phone/WhatsApp).
-                </CardDescription>
+                <CardDescription>Required for encrypted conversations. Agent will auto-enter PIN when needed.</CardDescription>
               </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="flex items-center gap-6">
-                  <div className="space-y-2">
-                    <Label>Idle Timeout - Unread (seconds)</Label>
-                    <p className="text-xs text-muted-foreground">Stop if no unread messages for this long</p>
-                    <Input
-                      type="number"
-                      min={30}
-                      max={600}
-                      value={idleTimeoutUnread}
-                      onChange={(e) => setIdleTimeoutUnread(parseInt(e.target.value) || 120)}
-                      className="w-24"
-                    />
+              <CardContent>
+                <div className="flex items-center gap-4 p-4 bg-muted/50 rounded-lg">
+                  <Lock className="w-5 h-5 text-purple-500" />
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="font-medium">E2EE PIN Status:</span>
+                      {msgPinHasPin ? (
+                        <Badge className="bg-green-500 text-white">Configured ✓</Badge>
+                      ) : (
+                        <Badge variant="outline" className="text-yellow-600 border-yellow-500">Not Set ⚠️</Badge>
+                      )}
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Required for encrypted conversations. Agent will auto-enter PIN when needed.
+                    </p>
                   </div>
-                  <div className="space-y-2">
-                    <Label>Wait Time - Conversation (seconds)</Label>
-                    <p className="text-xs text-muted-foreground">How long to wait for reply in each conversation</p>
+                  <div className="flex items-center gap-2">
                     <Input
-                      type="number"
-                      min={30}
-                      max={300}
-                      value={idleTimeoutConversation}
-                      onChange={(e) => setIdleTimeoutConversation(parseInt(e.target.value) || 60)}
-                      className="w-24"
+                      type="password"
+                      placeholder="6-digit PIN"
+                      value={msgPinValue}
+                      onChange={(e) => {
+                        const val = e.target.value.replace(/\D/g, "").slice(0, 6);
+                        setMsgPinValue(val);
+                      }}
+                      maxLength={6}
+                      className="w-28 font-mono text-center"
                     />
+                    <Button
+                      onClick={saveMsgPIN}
+                      disabled={msgPinSaving || msgPinValue.length !== 6}
+                      size="sm"
+                      variant="outline"
+                    >
+                      {msgPinSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                    </Button>
                   </div>
                 </div>
-                <Button onClick={runMessageAgent} disabled={loading || !selectedAccount} size="lg">
-                  {loading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Play className="w-4 h-4 mr-2" />}
-                  Run Message Agent
-                </Button>
               </CardContent>
             </Card>
 
-            {result && (result as { conversationsHandled?: unknown[] }).conversationsHandled && (
-              <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <CheckCircle className="h-5 w-5 text-green-500" />
-                    Message Agent Results
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                    <div className="text-center p-4 bg-muted rounded-lg">
-                      <p className="text-3xl font-bold text-primary">
-                        {(result as { stats?: { cyclesCompleted?: number } }).stats?.cyclesCompleted || 0}
-                      </p>
-                      <p className="text-xs text-muted-foreground">Cycles</p>
-                    </div>
-                    <div className="text-center p-4 bg-blue-500/10 rounded-lg border border-blue-500/30">
-                      <p className="text-3xl font-bold text-blue-600">
-                        {(result as { stats?: { conversationsProcessed?: number } }).stats?.conversationsProcessed || 0}
-                      </p>
-                      <p className="text-xs text-blue-600 font-medium">Conversations</p>
-                    </div>
-                    <div className="text-center p-4 bg-green-500/10 rounded-lg border border-green-500/30">
-                      <p className="text-3xl font-bold text-green-600">
-                        {(result as { stats?: { repliesSent?: number } }).stats?.repliesSent || 0}
-                      </p>
-                      <p className="text-xs text-green-600 font-medium">Replies Sent</p>
-                    </div>
-                    <div className="text-center p-4 bg-orange-500/10 rounded-lg border border-orange-500/30">
-                      <p className="text-3xl font-bold text-orange-600">
-                        {(result as { stats?: { contactsExtracted?: number } }).stats?.contactsExtracted || 0}
-                      </p>
-                      <p className="text-xs text-orange-600 font-medium">Contacts Extracted</p>
-                    </div>
-                  </div>
+            {/* Message Agent Sub-Tabs */}
+            <Tabs defaultValue="msg-init" className="space-y-4">
+              <TabsList className="grid w-full max-w-md grid-cols-2 h-12">
+                <TabsTrigger value="msg-init" className="text-base">
+                  <Rocket className="w-4 h-4 mr-2" />
+                  🚀 Init
+                </TabsTrigger>
+                <TabsTrigger value="msg-agent" className="text-base">
+                  <Bot className="w-4 h-4 mr-2" />
+                  🤖 Agent
+                </TabsTrigger>
+              </TabsList>
 
-                  {logs.length > 0 && (
-                    <div className="mt-4">
-                      <Label className="mb-2">Logs</Label>
-                      <ScrollArea className="h-48 border rounded-lg p-2">
-                        <div className="font-mono text-xs space-y-1">
-                          {logs.slice(-50).map((log, i) => (
-                            <div key={i} className="hover:bg-muted p-1 rounded">{log}</div>
-                          ))}
+              {/* ===== INIT SUB-TAB ===== */}
+              <TabsContent value="msg-init">
+                <div className="space-y-4">
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="flex items-center gap-2">
+                        <Rocket className="w-5 h-5 text-blue-500" />
+                        Phase 1: Initial Setup (One-Time)
+                      </CardTitle>
+                      <CardDescription>
+                        Scan sidebar for all contacts, then open each conversation to save full message history for AI context.
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      {/* Steps Explanation */}
+                      <div className="grid md:grid-cols-3 gap-4">
+                        <div className="bg-muted/50 p-4 rounded-lg border-l-4 border-purple-500">
+                          <p className="font-semibold text-purple-500 mb-2 flex items-center gap-2">
+                            <Lock className="w-4 h-4" /> Step 1: Check E2EE PIN
+                          </p>
+                          <ul className="text-sm text-muted-foreground space-y-1">
+                            <li>• Open Messenger</li>
+                            <li>• Detect PIN dialog</li>
+                            <li>• Auto-enter 6-digit PIN</li>
+                          </ul>
                         </div>
-                      </ScrollArea>
-                    </div>
+                        <div className="bg-muted/50 p-4 rounded-lg border-l-4 border-blue-500">
+                          <p className="font-semibold text-blue-500 mb-2">Step 2: Scan Sidebar</p>
+                          <ul className="text-sm text-muted-foreground space-y-1">
+                            <li>• Scroll to load all</li>
+                            <li>• Extract contact names</li>
+                            <li>• Filter system messages</li>
+                          </ul>
+                        </div>
+                        <div className="bg-muted/50 p-4 rounded-lg border-l-4 border-green-500">
+                          <p className="font-semibold text-green-500 mb-2">Step 3: Save History</p>
+                          <ul className="text-sm text-muted-foreground space-y-1">
+                            <li>• Open each conversation</li>
+                            <li>• Check PIN per E2EE conv</li>
+                            <li>• Save messages to DB</li>
+                          </ul>
+                        </div>
+                      </div>
+
+                      <Separator />
+
+                      {/* Settings */}
+                      <div className="flex items-center gap-4">
+                        <div className="space-y-1">
+                          <Label>Sidebar Scrolls</Label>
+                          <Input
+                            type="number"
+                            min={1}
+                            max={20}
+                            value={msgInitScrollCount}
+                            onChange={(e) => setMsgInitScrollCount(parseInt(e.target.value) || 5)}
+                            className="w-24"
+                          />
+                        </div>
+                        <p className="text-xs text-muted-foreground mt-5">
+                          More scrolls = more conversations loaded
+                        </p>
+                      </div>
+
+                      <div className="flex gap-3">
+                        <Button
+                          onClick={runMsgInit}
+                          disabled={msgInitRunning || !selectedAccount || !msgPinHasPin}
+                          size="lg"
+                          className="bg-blue-600 hover:bg-blue-700"
+                        >
+                          {msgInitRunning ? (
+                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          ) : (
+                            <Rocket className="w-4 h-4 mr-2" />
+                          )}
+                          Run Initialization
+                        </Button>
+
+                        <Button
+                          onClick={resetMsgConversations}
+                          disabled={msgInitRunning || !selectedAccount}
+                          variant="destructive"
+                          size="lg"
+                        >
+                          <Trash2 className="w-4 h-4 mr-2" />
+                          Reset All Conversations
+                        </Button>
+                      </div>
+
+                      {!msgPinHasPin && (
+                        <p className="text-sm text-yellow-600">
+                          ⚠️ Please configure E2EE PIN above before running init
+                        </p>
+                      )}
+                    </CardContent>
+                  </Card>
+
+                  {/* Progress Card */}
+                  {msgInitProgress.phase !== "idle" && (
+                    <Card>
+                      <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                          {msgInitProgress.phase === "complete" ? (
+                            <CheckCircle className="w-5 h-5 text-green-500" />
+                          ) : msgInitProgress.phase === "error" ? (
+                            <AlertCircle className="w-5 h-5 text-red-500" />
+                          ) : (
+                            <Loader2 className="w-5 h-5 text-blue-500 animate-spin" />
+                          )}
+                          {msgInitProgress.phase === "checking-pin" && "Checking E2EE PIN..."}
+                          {msgInitProgress.phase === "scanning" && "Scanning Sidebar..."}
+                          {msgInitProgress.phase === "opening" && "Saving Conversations..."}
+                          {msgInitProgress.phase === "complete" && "Initialization Complete!"}
+                          {msgInitProgress.phase === "error" && "Error"}
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent className="space-y-4">
+                        {/* Progress Bar */}
+                        {msgInitProgress.phase === "opening" && msgInitProgress.totalContacts > 0 && (
+                          <div className="space-y-2">
+                            <div className="flex justify-between text-sm">
+                              <span>Processing: {msgInitProgress.currentContact}</span>
+                              <span>
+                                {msgInitProgress.processedContacts} / {msgInitProgress.totalContacts}
+                              </span>
+                            </div>
+                            <Progress
+                              value={(msgInitProgress.processedContacts / msgInitProgress.totalContacts) * 100}
+                            />
+                          </div>
+                        )}
+
+                        {/* Stats */}
+                        <div className="grid grid-cols-4 gap-4">
+                          <div className={`text-center p-4 rounded-lg ${msgInitProgress.pinEntered ? "bg-green-500/10" : "bg-gray-500/10"}`}>
+                            <Lock className={`w-6 h-6 mx-auto mb-1 ${msgInitProgress.pinEntered ? "text-green-500" : "text-gray-400"}`} />
+                            <p className="text-xs text-muted-foreground">
+                              {msgInitProgress.pinEntered ? "PIN Entered" : "No PIN Needed"}
+                            </p>
+                          </div>
+                          <div className="text-center p-4 bg-blue-500/10 rounded-lg">
+                            <p className="text-2xl font-bold text-blue-500">
+                              {msgInitProgress.totalContacts}
+                            </p>
+                            <p className="text-xs text-muted-foreground">Contacts Found</p>
+                          </div>
+                          <div className="text-center p-4 bg-green-500/10 rounded-lg">
+                            <p className="text-2xl font-bold text-green-500">
+                              {msgInitProgress.processedContacts}
+                            </p>
+                            <p className="text-xs text-muted-foreground">Processed</p>
+                          </div>
+                          <div className="text-center p-4 bg-purple-500/10 rounded-lg">
+                            <p className="text-2xl font-bold text-purple-500">
+                              {msgInitProgress.savedMessages}
+                            </p>
+                            <p className="text-xs text-muted-foreground">Messages Saved</p>
+                          </div>
+                        </div>
+
+                        {/* Contacts List */}
+                        {msgInitContacts.length > 0 && (
+                          <div>
+                            <Label className="mb-2">Contacts</Label>
+                            <ScrollArea className="h-48 border rounded-lg">
+                              <div className="p-2 space-y-1">
+                                {msgInitContacts.map((contact, i) => (
+                                  <div
+                                    key={i}
+                                    className="flex items-center gap-2 p-2 bg-muted/30 rounded"
+                                  >
+                                    <User className="w-4 h-4 text-gray-400" />
+                                    <span className="font-medium text-sm">{contact.contactName}</span>
+                                    {contact.state && renderMsgStateBadge(contact.state)}
+                                    {contact.lastMessageIsOurs && (
+                                      <Badge variant="secondary" className="text-xs">You replied</Badge>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            </ScrollArea>
+                          </div>
+                        )}
+
+                        {/* Logs */}
+                        {msgInitLogs.length > 0 && (
+                          <div>
+                            <Label className="mb-2">Logs</Label>
+                            <ScrollArea className="h-48 border rounded-lg bg-black/5 dark:bg-white/5">
+                              <div className="p-2 font-mono text-xs space-y-0.5">
+                                {msgInitLogs.map((log, i) => (
+                                  <div key={i} className={`${
+                                    log.includes("ERROR") || log.includes("❌") ? "text-red-500" :
+                                    log.includes("✅") ? "text-green-500" :
+                                    log.includes("═") || log.includes("🚀") || log.includes("🎉") ? "text-blue-500" :
+                                    log.includes("🔐") ? "text-purple-500" :
+                                    "text-muted-foreground"
+                                  }`}>
+                                    {log}
+                                  </div>
+                                ))}
+                              </div>
+                            </ScrollArea>
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
                   )}
-                </CardContent>
-              </Card>
-            )}
+                </div>
+              </TabsContent>
+
+              {/* ===== AGENT SUB-TAB ===== */}
+              <TabsContent value="msg-agent">
+                <div className="space-y-4">
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="flex items-center gap-2">
+                        <Bot className="w-5 h-5 text-purple-500" />
+                        Phase 2: Message Monitoring Agent
+                      </CardTitle>
+                      <CardDescription>
+                        Continuously monitors Messenger for new messages and sends AI replies automatically. 
+                        Keeps browser open until no new messages are detected for the idle timeout duration.
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      {/* Agent Flow */}
+                      <div className="bg-muted/50 p-4 rounded-lg">
+                        <div className="flex items-center gap-2 flex-wrap text-sm">
+                          <Badge variant="outline" className="flex items-center gap-1">
+                            <Lock className="w-3 h-3" /> Check PIN
+                          </Badge>
+                          <ArrowRight className="w-4 h-4 text-muted-foreground" />
+                          <Badge variant="outline" className="flex items-center gap-1">
+                            <Database className="w-3 h-3" /> Load DB
+                          </Badge>
+                          <ArrowRight className="w-4 h-4 text-muted-foreground" />
+                          <Badge variant="outline" className="flex items-center gap-1">
+                            <MessageSquare className="w-3 h-3" /> Scan Sidebar
+                          </Badge>
+                          <ArrowRight className="w-4 h-4 text-muted-foreground" />
+                          <Badge variant="outline" className="flex items-center gap-1">
+                            <Zap className="w-3 h-3" /> Compare
+                          </Badge>
+                          <ArrowRight className="w-4 h-4 text-muted-foreground" />
+                          <Badge variant="outline" className="flex items-center gap-1">
+                            <MessageCircle className="w-3 h-3" /> Detect New
+                          </Badge>
+                          <ArrowRight className="w-4 h-4 text-muted-foreground" />
+                          <Badge variant="outline" className="flex items-center gap-1">
+                            <Send className="w-3 h-3" /> AI Reply
+                          </Badge>
+                        </div>
+                      </div>
+
+                      <Separator />
+
+                      {/* Settings */}
+                      <div className="grid md:grid-cols-2 gap-4">
+                        <div className="space-y-2">
+                          <Label>Idle Timeout (seconds)</Label>
+                          <Input
+                            type="number"
+                            min={30}
+                            max={600}
+                            value={msgIdleTimeout}
+                            onChange={(e) => setMsgIdleTimeout(parseInt(e.target.value) || 120)}
+                            disabled={msgAgentStatus.running}
+                            className="w-32"
+                          />
+                          <p className="text-xs text-muted-foreground">
+                            Stop monitoring after no new messages for this duration
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-3 p-3 bg-green-500/10 rounded-lg">
+                          <CheckCircle className="w-5 h-5 text-green-500" />
+                          <div>
+                            <Label className="text-green-700 dark:text-green-400">Auto-Reply: Always ON</Label>
+                            <p className="text-xs text-muted-foreground">
+                              AI-generated replies sent automatically to new messages
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+
+                      <Separator />
+
+                      {/* Controls */}
+                      <div className="flex gap-3">
+                        <Button
+                          onClick={startMsgAgent}
+                          disabled={!selectedAccount || !msgPinHasPin || msgAgentStatus.running}
+                          size="lg"
+                          className="bg-green-600 hover:bg-green-700"
+                        >
+                          {msgAgentStatus.running ? (
+                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          ) : (
+                            <Play className="w-4 h-4 mr-2" />
+                          )}
+                          {msgAgentStatus.running ? "Monitoring..." : "Start Monitoring"}
+                        </Button>
+
+                        <Button
+                          onClick={runSingleMsgCycle}
+                          disabled={msgAgentLoading || !selectedAccount || msgAgentStatus.running || !msgPinHasPin}
+                          variant="outline"
+                        >
+                          {msgAgentLoading ? (
+                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          ) : (
+                            <RefreshCw className="w-4 h-4 mr-2" />
+                          )}
+                          Run Single Cycle
+                        </Button>
+                      </div>
+
+                      {!msgPinHasPin && (
+                        <p className="text-sm text-yellow-600">
+                          ⚠️ Please configure E2EE PIN above before running agent
+                        </p>
+                      )}
+                    </CardContent>
+                  </Card>
+
+                  {/* Agent Status Card */}
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="flex items-center gap-2">
+                        {msgAgentStatus.running ? (
+                          <>
+                            <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse" />
+                            Agent Running
+                          </>
+                        ) : (
+                          <>
+                            <div className="w-3 h-3 bg-gray-400 rounded-full" />
+                            Agent Stopped
+                          </>
+                        )}
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      {/* Stats */}
+                      <div className="grid grid-cols-4 gap-4">
+                        <div className="text-center p-4 bg-blue-500/10 rounded-lg">
+                          <p className="text-2xl font-bold text-blue-500">
+                            {msgAgentStatus.cycleCount}
+                          </p>
+                          <p className="text-xs text-muted-foreground">Cycles</p>
+                        </div>
+                        <div className="text-center p-4 bg-gray-500/10 rounded-lg">
+                          <p className="text-2xl font-bold text-gray-500">
+                            {msgAgentStatus.totalChecked}
+                          </p>
+                          <p className="text-xs text-muted-foreground">Checked</p>
+                        </div>
+                        <div className="text-center p-4 bg-orange-500/10 rounded-lg">
+                          <p className="text-2xl font-bold text-orange-500">
+                            {msgAgentStatus.newMessagesDetected}
+                          </p>
+                          <p className="text-xs text-muted-foreground">New Messages</p>
+                        </div>
+                        <div className="text-center p-4 bg-green-500/10 rounded-lg">
+                          <p className="text-2xl font-bold text-green-500">
+                            {msgAgentStatus.repliesSent}
+                          </p>
+                          <p className="text-xs text-muted-foreground">Replies Sent</p>
+                        </div>
+                      </div>
+
+                      {/* Timing */}
+                      {msgAgentStatus.running && (
+                        <div className="flex gap-6 text-sm text-muted-foreground">
+                          {msgAgentStatus.lastRun && (
+                            <div className="flex items-center gap-1">
+                              <Clock className="w-4 h-4" />
+                              Last: {msgAgentStatus.lastRun.toLocaleTimeString()}
+                            </div>
+                          )}
+                          {msgAgentStatus.nextRun && (
+                            <div className="flex items-center gap-1">
+                              <Clock className="w-4 h-4" />
+                              Next: {msgAgentStatus.nextRun.toLocaleTimeString()}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Needs Reply */}
+                      {msgNeedsReply.length > 0 && (
+                        <div>
+                          <Label className="mb-2 text-orange-500">🔔 Needs Reply ({msgNeedsReply.length})</Label>
+                          <div className="space-y-2">
+                            {msgNeedsReply.map((item, i) => (
+                              <div
+                                key={i}
+                                className="flex items-start gap-3 p-3 bg-orange-500/10 border border-orange-500/30 rounded-lg"
+                              >
+                                <MessageCircle className="w-5 h-5 text-orange-500 mt-0.5" />
+                                <div>
+                                  <p className="font-medium">{item.contactName}</p>
+                                  <p className="text-sm text-muted-foreground line-clamp-2">
+                                    {item.message}
+                                  </p>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Agent Logs */}
+                      {msgAgentLogs.length > 0 && (
+                        <div>
+                          <Label className="mb-2">Agent Logs</Label>
+                          <ScrollArea className="h-64 border rounded-lg bg-black/5 dark:bg-white/5">
+                            <div className="p-2 font-mono text-xs space-y-0.5">
+                              {msgAgentLogs.map((log, i) => (
+                                <div
+                                  key={i}
+                                  className={`${
+                                    log.includes("ERROR") || log.includes("❌")
+                                      ? "text-red-500"
+                                      : log.includes("NEW") || log.includes("📨")
+                                      ? "text-orange-500"
+                                      : log.includes("SENT") || log.includes("✉️")
+                                      ? "text-green-500"
+                                      : log.includes("═") || log.includes("🤖")
+                                      ? "text-blue-500"
+                                      : log.includes("🔐")
+                                      ? "text-purple-500"
+                                      : "text-muted-foreground"
+                                  }`}
+                                >
+                                  {log}
+                                </div>
+                              ))}
+                            </div>
+                          </ScrollArea>
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                </div>
+              </TabsContent>
+            </Tabs>
           </div>
         </TabsContent>
 
