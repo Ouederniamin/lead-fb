@@ -16,9 +16,9 @@ const BUSINESS_FILE = path.join(process.cwd(), 'data', 'business.json');
 
 // Reply schema for AI generation - dynamic message count (1-3 messages)
 const ReplySchema = z.object({
-  messages: z.array(z.string()).min(1).max(3).describe("Array of messages to send. PREFER sending just 1 concise message when possible. Only split into 2-3 messages if the response genuinely requires it (e.g., asking multiple questions, or providing info then asking something). Each message should be short and natural."),
+  messages: z.array(z.string()).min(1).max(3).describe("Array of VERY SHORT messages (max 15-20 words each). Split smartly: info in one message, CTA/question in another. Never cram everything into one long message."),
   intent: z.enum(['greeting', 'qualify', 'propose', 'close', 'follow_up', 'objection_handling']).describe("The intent of this reply"),
-  reasoning: z.string().describe("Why this reply was chosen and why this number of messages"),
+  reasoning: z.string().describe("Why this reply was chosen"),
 });
 
 // System messages to filter out
@@ -860,9 +860,9 @@ ${formattedConversation}
 
 === قواعد إضافية للمحادثة ===
 1. ما تستعملش إيموجي
-2. حاول تبعث رسالة وحدة قصيرة ومختصرة
-3. قسم الرد لعدة رسائل كان لازم برك (مثلا: معلومة + سؤال)
-4. ${weAlreadyIntroduced ? 'ما تعاودش تعرف روحك - كمل المحادثة طبيعي' : 'عرف روحك باختصار في أول رسالة'}
+2. كل رسالة قصيرة برشا (15-20 كلمة ماكس)
+3. المعلومة في رسالة، السؤال/CTA في رسالة أخرى
+4. ${weAlreadyIntroduced ? 'ما تعاودش تعرف روحك' : 'عرف روحك باختصار'}
 5. سؤال واحد فقط في كل رد`;
     } else {
       // Default prompt if no custom prompt saved
@@ -885,12 +885,12 @@ ${formattedConversation}
 === القواعد ===
 1. ما تستعملش إيموجي أبدا
 2. احكي بنفس لغة الكليان (تونسي، فرنساوي، انجليزي)
-3. حاول تبعث رسالة وحدة قصيرة ومختصرة
+3. كل رسالة قصيرة برشا (15-20 كلمة ماكس)
 4. كيف إنسان يكتب - طبيعي، كاجوال
-5. قسم الرد لعدة رسائل كان لازم برك (معلومة + سؤال)
+5. المعلومة في رسالة، السؤال/CTA في رسالة أخرى
 6. سؤال واحد فقط في كل رد
 7. ما تكونش formal - كون طبيعي
-8. ${weAlreadyIntroduced ? 'ما تعاودش تعرف روحك' : 'عرف روحك في أول رسالة'}`;
+8. ${weAlreadyIntroduced ? 'ما تعاودش تعرف روحك' : 'عرف روحك باختصار'}`;
     }
     
     console.log(`[AI] Using ${customPrompt ? 'CUSTOM' : 'DEFAULT'} prompt from ai-tune`);
