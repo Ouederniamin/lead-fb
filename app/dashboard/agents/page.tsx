@@ -22,6 +22,11 @@ import {
   ChevronRight,
   Zap,
   Moon,
+  Rocket,
+  Lock,
+  Send,
+  Users,
+  FileSearch,
 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -88,31 +93,38 @@ const statusConfig: Record<string, { label: string; variant: "default" | "second
 };
 
 const agentTypeInfo: Record<string, { icon: typeof Search; title: string; description: string; color: string; bgColor: string }> = {
-  // New 3-Agent Architecture
+  // New 4-Agent Architecture
+  GROUP_INIT: {
+    icon: FileSearch,
+    title: "Group Initializer",
+    description: "Initialize groups by scraping 40-50 historical posts",
+    color: "text-orange-500",
+    bgColor: "bg-orange-500/10",
+  },
   SCRAPER: {
     icon: Search,
     title: "Scraper Agent",
-    description: "Scrapes ALL groups, AI analysis, creates Leads",
+    description: "Scrape new posts from groups, AI analysis, create leads",
     color: "text-blue-500",
     bgColor: "bg-blue-500/10",
   },
   INITIATOR: {
     icon: Zap,
     title: "Initiator Agent",
-    description: "Comments on posts, sends initial DMs",
+    description: "Comment on posts + send DMs with AI-generated content",
     color: "text-yellow-500",
     bgColor: "bg-yellow-500/10",
   },
   MESSAGE: {
     icon: MessageSquare,
     title: "Message Agent",
-    description: "Monitor inbox, AI replies with lead context",
+    description: "Monitor Messenger, AI replies, manage conversations",
     color: "text-purple-500",
     bgColor: "bg-purple-500/10",
   },
-  // Legacy types
+  // Legacy types (for backwards compatibility)
   FIRST_TIME_SCRAPER: {
-    icon: Search,
+    icon: FileSearch,
     title: "First-Time Scraper",
     description: "Initialize groups with historical posts",
     color: "text-orange-500",
@@ -281,35 +293,66 @@ export default function AgentsPage() {
           </div>
         </div>
 
-        {/* 3 Agent Types Overview */}
-        <div className="grid md:grid-cols-3 gap-4">
-          {/* First-Time Scraper */}
-          <Card className="relative overflow-hidden">
-            <div className="absolute top-0 right-0 w-24 h-24 bg-blue-500/5 rounded-full -mr-8 -mt-8" />
+        {/* 4 Agent Types Overview - Matching Testing Page */}
+        <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4">
+          {/* Group Initializer */}
+          <Card className="relative overflow-hidden border-orange-500/20">
+            <div className="absolute top-0 right-0 w-24 h-24 bg-orange-500/5 rounded-full -mr-8 -mt-8" />
             <CardHeader className="pb-2">
               <div className="flex items-start justify-between">
-                <div className={`h-12 w-12 rounded-xl ${agentTypeInfo.FIRST_TIME_SCRAPER.bgColor} flex items-center justify-center`}>
-                  <Search className={`h-6 w-6 ${agentTypeInfo.FIRST_TIME_SCRAPER.color}`} />
+                <div className={`h-12 w-12 rounded-xl ${agentTypeInfo.GROUP_INIT.bgColor} flex items-center justify-center`}>
+                  <FileSearch className={`h-6 w-6 ${agentTypeInfo.GROUP_INIT.color}`} />
                 </div>
-                <Badge variant="outline">Manual</Badge>
+                <Badge variant="outline" className="text-orange-600 border-orange-500/50">Manual</Badge>
               </div>
-              <CardTitle className="mt-3">🔄 First-Time Scraper</CardTitle>
-              <CardDescription>
-                Initialize groups by scraping 40-50 historical posts
+              <CardTitle className="mt-3 text-base">🔄 Group Initializer</CardTitle>
+              <CardDescription className="text-xs">
+                Initialize groups with 40-50 historical posts
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              <div className="text-sm text-muted-foreground">
-                <p>• Triggered manually per group</p>
-                <p>• Sets baseline for incremental scraping</p>
+              <div className="text-xs text-muted-foreground space-y-1">
                 <p>• Run once per new group</p>
-              </div>
-              <Separator />
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-muted-foreground">Procedures</span>
-                <span className="font-mono text-xs">P1 → P2 → P5 → P6</span>
+                <p>• Scrapes historical posts</p>
+                <p>• Sets baseline for incremental</p>
               </div>
               <Link href="/dashboard/agents/testing">
+                <Button variant="outline" className="w-full" size="sm">
+                  <FlaskConical className="h-4 w-4 mr-2" />
+                  Test Initializer
+                  <ChevronRight className="h-4 w-4 ml-auto" />
+                </Button>
+              </Link>
+            </CardContent>
+          </Card>
+
+          {/* Scraper Agent */}
+          <Card className="relative overflow-hidden border-blue-500/20">
+            <div className="absolute top-0 right-0 w-24 h-24 bg-blue-500/5 rounded-full -mr-8 -mt-8" />
+            <CardHeader className="pb-2">
+              <div className="flex items-start justify-between">
+                <div className={`h-12 w-12 rounded-xl ${agentTypeInfo.SCRAPER.bgColor} flex items-center justify-center`}>
+                  <Search className={`h-6 w-6 ${agentTypeInfo.SCRAPER.color}`} />
+                </div>
+                <Badge variant="outline" className="text-blue-600 border-blue-500/50">Manual</Badge>
+              </div>
+              <CardTitle className="mt-3 text-base">🔍 Scraper Agent</CardTitle>
+              <CardDescription className="text-xs">
+                Scrape new posts, AI analysis, create leads
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                <div className="p-2 bg-muted rounded-lg text-center">
+                  <p className="font-bold text-lg">{dailyLimits.scrapes.current}</p>
+                  <p className="text-muted-foreground">Scrapes</p>
+                </div>
+                <div className="p-2 bg-muted rounded-lg text-center">
+                  <p className="font-bold text-lg">{agents.reduce((sum, a) => sum + a.totalLeadsFound, 0)}</p>
+                  <p className="text-muted-foreground">Leads</p>
+                </div>
+              </div>
+              <Link href="/dashboard/agents/testing?tab=scraper">
                 <Button variant="outline" className="w-full" size="sm">
                   <FlaskConical className="h-4 w-4 mr-2" />
                   Test Scraper
@@ -319,114 +362,136 @@ export default function AgentsPage() {
             </CardContent>
           </Card>
 
-          {/* Lead Gen Agent */}
-          <Card className="relative overflow-hidden">
-            <div className="absolute top-0 right-0 w-24 h-24 bg-green-500/5 rounded-full -mr-8 -mt-8" />
+          {/* Initiator Agent */}
+          <Card className="relative overflow-hidden border-yellow-500/20">
+            <div className="absolute top-0 right-0 w-24 h-24 bg-yellow-500/5 rounded-full -mr-8 -mt-8" />
             <CardHeader className="pb-2">
               <div className="flex items-start justify-between">
-                <div className={`h-12 w-12 rounded-xl ${agentTypeInfo.LEAD_GEN.bgColor} flex items-center justify-center`}>
-                  <Bot className={`h-6 w-6 ${agentTypeInfo.LEAD_GEN.color}`} />
+                <div className={`h-12 w-12 rounded-xl ${agentTypeInfo.INITIATOR.bgColor} flex items-center justify-center`}>
+                  <Zap className={`h-6 w-6 ${agentTypeInfo.INITIATOR.color}`} />
                 </div>
                 {scheduleStatus?.leadGenAgent && (
-                  <Badge variant={scheduleStatus.leadGenAgent.shouldRun ? "default" : "secondary"}>
+                  <Badge variant={scheduleStatus.leadGenAgent.shouldRun ? "default" : "secondary"} className="text-xs">
                     {scheduleStatus.leadGenAgent.shouldRun 
                       ? scheduleStatus.leadGenAgent.isPeak ? "⚡ Peak" : "Active" 
                       : "Paused"}
                   </Badge>
                 )}
               </div>
-              <CardTitle className="mt-3">🎯 Lead Gen Agent</CardTitle>
-              <CardDescription>
-                Scrape posts, AI analysis, create leads, engage
+              <CardTitle className="mt-3 text-base">⚡ Initiator Agent</CardTitle>
+              <CardDescription className="text-xs">
+                Comment on posts + send DMs to leads
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              <div className="grid grid-cols-2 gap-2 text-sm">
-                <div className="p-2 bg-muted rounded-lg text-center">
-                  <p className="font-bold text-lg">{dailyLimits.scrapes.current}</p>
-                  <p className="text-xs text-muted-foreground">Scrapes Today</p>
-                </div>
+              <div className="grid grid-cols-2 gap-2 text-xs">
                 <div className="p-2 bg-muted rounded-lg text-center">
                   <p className="font-bold text-lg">{dailyLimits.comments.current}</p>
-                  <p className="text-xs text-muted-foreground">Comments</p>
+                  <p className="text-muted-foreground">Comments</p>
+                </div>
+                <div className="p-2 bg-muted rounded-lg text-center">
+                  <p className="font-bold text-lg">{dailyLimits.dms.current}</p>
+                  <p className="text-muted-foreground">DMs</p>
                 </div>
               </div>
-              <Separator />
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-muted-foreground">Schedule</span>
-                <span className="text-xs">22 runs/day (08-23h)</span>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <Link href="/dashboard/agents/schedule/lead-gen">
-                  <Button variant="outline" className="w-full" size="sm">
-                    <Calendar className="h-4 w-4 mr-2" />
-                    Schedule
-                  </Button>
-                </Link>
-                <Link href="/dashboard/agents/testing?tab=lead-gen">
-                  <Button variant="outline" className="w-full" size="sm">
-                    <FlaskConical className="h-4 w-4 mr-2" />
-                    Test
-                  </Button>
-                </Link>
-              </div>
+              <Link href="/dashboard/agents/testing?tab=initiator">
+                <Button variant="outline" className="w-full" size="sm">
+                  <FlaskConical className="h-4 w-4 mr-2" />
+                  Test Initiator
+                  <ChevronRight className="h-4 w-4 ml-auto" />
+                </Button>
+              </Link>
             </CardContent>
           </Card>
 
           {/* Message Agent */}
-          <Card className="relative overflow-hidden">
+          <Card className="relative overflow-hidden border-purple-500/20">
             <div className="absolute top-0 right-0 w-24 h-24 bg-purple-500/5 rounded-full -mr-8 -mt-8" />
             <CardHeader className="pb-2">
               <div className="flex items-start justify-between">
-                <div className={`h-12 w-12 rounded-xl ${agentTypeInfo.DM_ONLY.bgColor} flex items-center justify-center`}>
-                  <MessageSquare className={`h-6 w-6 ${agentTypeInfo.DM_ONLY.color}`} />
+                <div className={`h-12 w-12 rounded-xl ${agentTypeInfo.MESSAGE.bgColor} flex items-center justify-center`}>
+                  <MessageSquare className={`h-6 w-6 ${agentTypeInfo.MESSAGE.color}`} />
                 </div>
                 {scheduleStatus?.messageAgent && (
-                  <Badge variant={scheduleStatus.messageAgent.shouldRun ? "default" : "secondary"}>
+                  <Badge variant={scheduleStatus.messageAgent.shouldRun ? "default" : "secondary"} className="text-xs">
                     {scheduleStatus.messageAgent.shouldRun 
                       ? scheduleStatus.messageAgent.isPeak ? "⚡ Peak" : "Active" 
                       : "Paused"}
                   </Badge>
                 )}
               </div>
-              <CardTitle className="mt-3">💬 Message Agent</CardTitle>
-              <CardDescription>
-                Monitor Messenger, AI replies, collect contacts
+              <CardTitle className="mt-3 text-base">💬 Message Agent</CardTitle>
+              <CardDescription className="text-xs">
+                Monitor Messenger, AI replies, manage convos
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              <div className="grid grid-cols-2 gap-2 text-sm">
+              <div className="grid grid-cols-2 gap-2 text-xs">
                 <div className="p-2 bg-muted rounded-lg text-center">
-                  <p className="font-bold text-lg">{dailyLimits.dms.current}</p>
-                  <p className="text-xs text-muted-foreground">DMs Today</p>
+                  <p className="font-bold text-lg">{agents.reduce((sum, a) => sum + a.totalDMsSent, 0)}</p>
+                  <p className="text-muted-foreground">Replies</p>
                 </div>
                 <div className="p-2 bg-muted rounded-lg text-center">
                   <p className="font-bold text-lg">{dailyLimits.friendRequests.current}</p>
-                  <p className="text-xs text-muted-foreground">Friend Req</p>
+                  <p className="text-muted-foreground">Friend Req</p>
                 </div>
               </div>
-              <Separator />
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-muted-foreground">Schedule</span>
-                <span className="text-xs">22 runs/day (08-23h)</span>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <Link href="/dashboard/agents/schedule/message-agent">
-                  <Button variant="outline" className="w-full" size="sm">
-                    <Calendar className="h-4 w-4 mr-2" />
-                    Schedule
-                  </Button>
-                </Link>
-                <Link href="/dashboard/agents/testing?tab=message">
-                  <Button variant="outline" className="w-full" size="sm">
-                    <FlaskConical className="h-4 w-4 mr-2" />
-                    Test
-                  </Button>
-                </Link>
-              </div>
+              <Link href="/dashboard/agents/testing?tab=message">
+                <Button variant="outline" className="w-full" size="sm">
+                  <FlaskConical className="h-4 w-4 mr-2" />
+                  Test Message
+                  <ChevronRight className="h-4 w-4 ml-auto" />
+                </Button>
+              </Link>
             </CardContent>
           </Card>
         </div>
+
+        {/* Workflow Overview */}
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-lg flex items-center gap-2">
+              <Rocket className="h-5 w-5 text-primary" />
+              Agent Workflow
+            </CardTitle>
+            <CardDescription>How the 4 agents work together</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="flex items-center justify-center gap-2 flex-wrap text-sm py-4">
+              <div className="flex items-center gap-2 p-3 bg-orange-500/10 rounded-lg border border-orange-500/20">
+                <FileSearch className="w-5 h-5 text-orange-500" />
+                <div>
+                  <p className="font-medium text-orange-600">1. Initializer</p>
+                  <p className="text-xs text-muted-foreground">Setup groups</p>
+                </div>
+              </div>
+              <ChevronRight className="w-5 h-5 text-muted-foreground" />
+              <div className="flex items-center gap-2 p-3 bg-blue-500/10 rounded-lg border border-blue-500/20">
+                <Search className="w-5 h-5 text-blue-500" />
+                <div>
+                  <p className="font-medium text-blue-600">2. Scraper</p>
+                  <p className="text-xs text-muted-foreground">Find leads</p>
+                </div>
+              </div>
+              <ChevronRight className="w-5 h-5 text-muted-foreground" />
+              <div className="flex items-center gap-2 p-3 bg-yellow-500/10 rounded-lg border border-yellow-500/20">
+                <Zap className="w-5 h-5 text-yellow-500" />
+                <div>
+                  <p className="font-medium text-yellow-600">3. Initiator</p>
+                  <p className="text-xs text-muted-foreground">Comment + DM</p>
+                </div>
+              </div>
+              <ChevronRight className="w-5 h-5 text-muted-foreground" />
+              <div className="flex items-center gap-2 p-3 bg-purple-500/10 rounded-lg border border-purple-500/20">
+                <MessageSquare className="w-5 h-5 text-purple-500" />
+                <div>
+                  <p className="font-medium text-purple-600">4. Message</p>
+                  <p className="text-xs text-muted-foreground">AI replies</p>
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
 
         {/* Schedule Overview */}
         {schedule && (
